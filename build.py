@@ -42,8 +42,12 @@ def load():
     pages = []
     for f in sorted(glob.glob(os.path.join(ROOT, "content", "*.md"))):
         raw = open(f, encoding="utf-8").read()
-        _, fm, body = raw.split("---", 2)
+        mm = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.S)
+        if not mm: raise SystemExit(f"bad front matter: {f}")
+        fm, body = mm.group(1), mm.group(2)
         meta = yaml.safe_load(fm)
+        for k in ("error", "cat", "description", "tldr"):
+            if k not in meta: raise SystemExit(f"{f}: missing {k}")
         meta["slug"] = os.path.basename(f)[:-3]
         meta["body"] = body.strip()
         meta.setdefault("updated", datetime.date.fromtimestamp(os.path.getmtime(f)).isoformat())
