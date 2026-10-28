@@ -19,7 +19,7 @@ def esc(s): return html.escape(s, quote=True)
 def layout(title, desc, body, path, extra_head=""):
     canon = BASE + path
     beacon = (f'<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon=\'{{"token": "{ANALYTICS}"}}\'></script>' if ANALYTICS else "")
-    beacon += '<script data-goatcounter="https://errorfix.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+    beacon += '<script data-goatcounter="https://errorfix.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>'
     nav = "".join(f'<a href="/{k}/">{esc(v)}</a>' for k, v in CATS.items() if k in USED)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
