@@ -1,0 +1,9 @@
+<label for="jwt-in">Paste a JWT <small>(the "Bearer " prefix is removed automatically)</small></label>
+<textarea id="jwt-in" spellcheck="false" class="short" placeholder="eyJhbGciOi..."></textarea>
+<div class="row"><button id="jwt-sample" class="sec">Example token</button></div>
+<div id="jwt-msg" class="msg" hidden></div>
+<div id="jwt-res" hidden>
+<h3>Header</h3><pre class="out"><code id="jwt-h"></code></pre>
+<h3>Payload</h3><pre class="out"><code id="jwt-p"></code></pre>
+<h3>Claims</h3><table id="jwt-claims" class="kv"></table>
+</div>

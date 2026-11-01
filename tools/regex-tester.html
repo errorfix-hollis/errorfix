@@ -1,0 +1,13 @@
+<div class="row re">
+<span class="slash">/</span><input type="text" id="re-pat" class="big grow" spellcheck="false" autocomplete="off" value="(?&lt;year&gt;\d{4})-(\d{2})-(\d{2})" aria-label="Regular expression"><span class="slash">/</span><input type="text" id="re-flags" class="big flags" spellcheck="false" autocomplete="off" value="g" aria-label="Flags">
+</div>
+<div id="re-msg" class="msg" hidden></div>
+<label for="re-text">Test string</label>
+<textarea id="re-text" spellcheck="false">Released 2024-05-17, patched 2024-06-02.
+Next release: 2025-01-09 (maybe).</textarea>
+<label>Matches</label>
+<pre class="out hl" id="re-hl"></pre>
+<table id="re-table" class="kv"></table>
+<label for="re-rep">Replace with <small>(optional: $1, $&lt;name&gt;, $&amp;)</small></label>
+<input type="text" id="re-rep" class="big" spellcheck="false" autocomplete="off" placeholder="$3/$2/$<year>">
+<div id="re-repwrap" hidden><label>Result</label><pre class="out" id="re-repout"></pre></div>

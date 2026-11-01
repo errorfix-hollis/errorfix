@@ -1,4 +1,4 @@
-document.querySelectorAll('article pre:not(.err)').forEach(p=>{const b=document.createElement('button');b.className='copy';b.textContent='copy';b.onclick=()=>{navigator.clipboard.writeText(p.innerText.replace(/\ncopy$/,'')).then(()=>{b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})};p.appendChild(b)});
+document.querySelectorAll('article pre:not(.err):not(.out)').forEach(p=>{const b=document.createElement('button');b.className='copy';b.textContent='copy';b.onclick=()=>{navigator.clipboard.writeText(p.innerText.replace(/\ncopy$/,'')).then(()=>{b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})};p.appendChild(b)});
 (function(){const r=document.getElementById('results');if(!r)return;const q=new URLSearchParams(location.search).get('q')||'';document.querySelectorAll('input[name=q]').forEach(i=>i.value=q);
 const norm=s=>s.toLowerCase().replace(/[^a-z0-9 ]+/g,' ');const words=norm(q).split(/\s+/).filter(w=>w.length>1);
 fetch('/index.json').then(x=>x.json()).then(idx=>{if(!words.length){r.innerHTML='<p>Type or paste an error message above.</p>';return}

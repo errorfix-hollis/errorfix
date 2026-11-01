@@ -1,0 +1,16 @@
+<table class="chmod">
+<tr><th></th><th>Read (4)</th><th>Write (2)</th><th>Execute (1)</th></tr>
+<tr><th>Owner (u)</th><td><input type="checkbox" data-i="1" data-v="4" aria-label="owner read"></td><td><input type="checkbox" data-i="1" data-v="2" aria-label="owner write"></td><td><input type="checkbox" data-i="1" data-v="1" aria-label="owner execute"></td></tr>
+<tr><th>Group (g)</th><td><input type="checkbox" data-i="2" data-v="4" aria-label="group read"></td><td><input type="checkbox" data-i="2" data-v="2" aria-label="group write"></td><td><input type="checkbox" data-i="2" data-v="1" aria-label="group execute"></td></tr>
+<tr><th>Others (o)</th><td><input type="checkbox" data-i="3" data-v="4" aria-label="others read"></td><td><input type="checkbox" data-i="3" data-v="2" aria-label="others write"></td><td><input type="checkbox" data-i="3" data-v="1" aria-label="others execute"></td></tr>
+<tr><th>Special</th><td><label><input type="checkbox" data-i="0" data-v="4"> setuid</label></td><td><label><input type="checkbox" data-i="0" data-v="2"> setgid</label></td><td><label><input type="checkbox" data-i="0" data-v="1"> sticky</label></td></tr>
+</table>
+<div class="row two">
+<label>Octal<input type="text" id="chmod-oct" class="big" spellcheck="false" autocomplete="off" inputmode="numeric"></label>
+<label>Symbolic<input type="text" id="chmod-sym" class="big" spellcheck="false" autocomplete="off"></label>
+</div>
+<div id="chmod-msg" class="msg" hidden></div>
+<pre class="out"><code id="chmod-cmd"></code></pre>
+<pre class="out"><code id="chmod-cmd2"></code></pre>
+<p class="small">As shown by <code>ls -l</code>: <code id="chmod-ls"></code> <button id="chmod-copy" class="sec">Copy command</button></p>
+<div class="row presets"><button class="sec" data-mode="644">644</button><button class="sec" data-mode="755">755</button><button class="sec" data-mode="600">600</button><button class="sec" data-mode="700">700</button><button class="sec" data-mode="400">400</button><button class="sec" data-mode="775">775</button><button class="sec" data-mode="777">777</button><button class="sec" data-mode="1777">1777</button></div>

@@ -1,0 +1,15 @@
+<label for="url-in">Input</label>
+<textarea id="url-in" spellcheck="false" class="short" placeholder="Text or URL to encode, or %-encoded text to decode"></textarea>
+<div class="row">
+<button id="url-encc">encodeURIComponent</button><button id="url-enc" class="sec">encodeURI</button><button id="url-dec">Decode</button>
+<label><input type="checkbox" id="url-plus" checked> Decode + as space</label>
+<button id="url-swap" class="sec">↕ Swap</button>
+</div>
+<div id="url-msg" class="msg" hidden></div>
+<label for="url-out">Output</label>
+<textarea id="url-out" spellcheck="false" class="short" readonly></textarea>
+<div class="row"><button id="url-copy" class="sec">Copy output</button></div>
+<h3>Query string parser</h3>
+<label for="qs-in">Paste a full URL or a query string</label>
+<input type="text" id="qs-in" class="big" spellcheck="false" autocomplete="off" value="https://example.com/search?q=hello+world&amp;lang=en&amp;tag=a%26b&amp;tag=c#results">
+<table id="qs-out" class="kv"></table>

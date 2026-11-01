@@ -13,6 +13,9 @@ CATS = {
  "database": "Databases", "web": "Web & HTTP", "rust": "Rust", "go": "Go", "kubernetes": "Kubernetes",
 }
 ANALYTICS = os.environ.get("CF_BEACON", "")
+import hashlib
+JSV = hashlib.md5(open(os.path.join(ROOT, "static", "tools.js"), "rb").read()).hexdigest()[:8]
+CSSV = hashlib.md5(open(os.path.join(ROOT, "static", "style.css"), "rb").read()).hexdigest()[:8]
 
 def esc(s): return html.escape(s, quote=True)
 
@@ -20,7 +23,7 @@ def layout(title, desc, body, path, extra_head=""):
     canon = BASE + path
     beacon = (f'<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon=\'{{"token": "{ANALYTICS}"}}\'></script>' if ANALYTICS else "")
     beacon += '<script data-goatcounter="https://errorfix.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>'
-    nav = "".join(f'<a href="/{k}/">{esc(v)}</a>' for k, v in CATS.items() if k in USED)
+    nav = '<a href="/tools/" class="navtools">Tools</a>' + "".join(f'<a href="/{k}/">{esc(v)}</a>' for k, v in CATS.items() if k in USED)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -29,13 +32,13 @@ def layout(title, desc, body, path, extra_head=""):
 <link rel="canonical" href="{canon}">
 <meta property="og:title" content="{esc(title)}"><meta property="og:description" content="{esc(desc)}">
 <meta property="og:url" content="{canon}"><meta property="og:type" content="article"><meta property="og:site_name" content="{SITE}">
-<link rel="stylesheet" href="/style.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css?v={CSSV}"><link rel="icon" href="/favicon.svg" type="image/svg+xml">
 {extra_head}</head><body>
 <header><div class="wrap"><a class="logo" href="/">error<b>fix</b></a>
 <form class="search" action="/search/" role="search"><input name="q" type="search" placeholder="Paste an error message…" aria-label="Search errors"></form></div>
 <nav class="wrap cats">{nav}</nav></header>
 <main class="wrap">{body}</main>
-<footer><div class="wrap"><p>errorfix — plain fixes for confusing error messages. No ads, no tracking cookies. <a href="/about/">About</a> · <a href="/all/">All errors</a></p></div></footer>
+<footer><div class="wrap"><p>errorfix — plain fixes for confusing error messages. No ads, no tracking cookies. <a href="/about/">About</a> · <a href="/all/">All errors</a> · <a href="/tools/">Developer tools</a></p></div></footer>
 <script src="/app.js" defer></script>{beacon}
 </body></html>"""
 
@@ -54,6 +57,65 @@ def load():
         meta.setdefault("updated", datetime.date.fromtimestamp(os.path.getmtime(f)).isoformat())
         pages.append(meta)
     return pages
+
+def load_tools():
+    """Tool pages: tools/<slug>.md (front matter + reference text) and tools/<slug>.html (the widget)."""
+    tools = []
+    for f in sorted(glob.glob(os.path.join(ROOT, "tools", "*.md"))):
+        raw = open(f, encoding="utf-8").read()
+        mm = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.S)
+        if not mm: raise SystemExit(f"bad front matter: {f}")
+        meta = yaml.safe_load(mm.group(1))
+        for k in ("name", "title", "h1", "description", "intro", "js", "order"):
+            if k not in meta: raise SystemExit(f"{f}: missing {k}")
+        meta["slug"] = os.path.basename(f)[:-3]
+        meta["body"] = mm.group(2).strip()
+        meta["widget"] = open(f[:-3] + ".html", encoding="utf-8").read()
+        meta["path"] = f"/tools/{meta['slug']}/"
+        meta.setdefault("updated", datetime.date.fromtimestamp(max(os.path.getmtime(f), os.path.getmtime(f[:-3] + ".html"))).isoformat())
+        tools.append(meta)
+    return sorted(tools, key=lambda t: t["order"])
+
+def build_tools(tools, pages, urls):
+    byslug = {p["slug"]: p for p in pages}
+    for t in tools:
+        rel = []
+        for s in t.get("related") or []:
+            if s not in byslug: raise SystemExit(f"tool {t['slug']}: related page {s} not found")
+            rel.append(byslug[s])
+        relhtml = "".join(f'<li><a href="{q["path"]}">{esc(q["error"])}</a></li>' for q in rel)
+        more = "".join(f'<li><a href="{o["path"]}">{esc(o["name"])}</a></li>' for o in tools if o is not t)
+        ld = {"@context": "https://schema.org", "@type": "WebApplication", "name": t["name"], "url": BASE + t["path"],
+              "description": t["description"], "applicationCategory": "DeveloperApplication", "operatingSystem": "Any (runs in the browser)",
+              "browserRequirements": "Requires JavaScript", "isAccessibleForFree": True, "dateModified": t["updated"],
+              "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Organization", "name": SITE}}
+        crumbs = {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": SITE, "item": BASE + "/"},
+            {"@type": "ListItem", "position": 2, "name": "Tools", "item": BASE + "/tools/"},
+            {"@type": "ListItem", "position": 3, "name": t["name"], "item": BASE + t["path"]}]}
+        head = (f'<script type="application/ld+json">{json.dumps(ld)}</script><script type="application/ld+json">{json.dumps(crumbs)}</script>'
+                f'<script src="/tools.js?v={JSV}" defer></script>')
+        aside = (f'<h2>Related errors</h2><ul class="list">{relhtml}</ul>' if relhtml else "") + f'<h2>More developer tools</h2><ul class="list">{more}</ul>'
+        body = f"""<p class="crumbs"><a href="/">Home</a> › <a href="/tools/">Tools</a></p>
+<article class="toolpage"><h1>{esc(t['h1'])}</h1>
+<p class="lead">{esc(t['intro'])}</p>
+<p class="private">🔒 Runs entirely in your browser. Nothing you paste is uploaded or sent to a server.</p>
+<div class="tool" data-tool="{esc(t['js'])}">{t['widget']}<noscript><p class="msg bad">This tool needs JavaScript enabled.</p></noscript></div>
+{render_md(t['body']).replace(chr(92) + '|', '|')}
+<p class="upd">Last updated {t['updated']}.</p></article>
+<aside>{aside}</aside>"""
+        write(t["path"], layout(t["title"], t["description"], body, t["path"], head))
+        urls.append((t["path"], t["updated"]))
+    li = "".join(f'<li><a href="{t["path"]}">{esc(t["name"])}</a><span>{esc(t["intro"])}</span></li>' for t in tools)
+    ld = {"@context": "https://schema.org", "@type": "ItemList", "name": "Developer tools", "itemListElement": [
+        {"@type": "ListItem", "position": k + 1, "url": BASE + t["path"], "name": t["name"]} for k, t in enumerate(tools)]}
+    body = f"""<p class="crumbs"><a href="/">Home</a></p><h1>Free developer tools</h1>
+<p class="lead">Small, fast tools for everyday debugging: formatters, converters and decoders. They run entirely in your browser, so nothing you paste ever leaves your machine. No sign-up, no ads.</p>
+<ul class="list big">{li}</ul>"""
+    write("/tools/", layout(f"Free online developer tools (JSON, cron, chmod, JWT, regex) — {SITE}",
+        "Free client-side developer tools: JSON formatter and validator, cron explainer, chmod calculator, Unix timestamp converter, Base64, URL encoder, JWT decoder and regex tester.",
+        body, "/tools/", f'<script type="application/ld+json">{json.dumps(ld)}</script>'))
+    urls.append(("/tools/", max(t["updated"] for t in tools)))
 
 def render_md(text):
     return markdown.markdown(text, extensions=["fenced_code", "tables", "toc", "sane_lists"])
@@ -97,6 +159,8 @@ def main():
 <aside><h2>Related errors</h2><ul class="list">{relhtml}</ul></aside>"""
         write(path, layout(ttl, p["description"], body, path, head))
         urls.append((path, p["updated"]))
+    tools = load_tools()
+    build_tools(tools, pages, urls)
     for c, items in bycat.items():
         items.sort(key=lambda q: q["error"].lower())
         li = "".join(f'<li><a href="{q["path"]}">{esc(q["error"])}</a><span>{esc(q["description"])}</span></li>' for q in items)
@@ -113,19 +177,22 @@ def main():
     home = f"""<section class="hero"><h1>Fix that error message.</h1>
 <p>Short, tested explanations of confusing errors from Git, npm, Python, Docker, SSH, Linux and more. What it means, why it happens, and the exact commands that fix it.</p>
 <form action="/search/"><input name="q" type="search" placeholder="e.g. permission denied (publickey)" autofocus><button>Search</button></form></section>
-<div class="cards">{catcards}</div><h2>Recently updated</h2><ul class="list">{rec}</ul>"""
+<div class="cards">{catcards}</div>
+<h2>Developer tools</h2><p class="tools-line">{" · ".join(f'<a href="{t["path"]}">{esc(t["name"])}</a>' for t in tools)}</p>
+<h2>Recently updated</h2><ul class="list">{rec}</ul>"""
     write("/", layout(f"{SITE} — plain-English fixes for developer error messages", "Clear fixes for common developer error messages from Git, npm, Python, Docker, SSH and Linux, with copy-paste commands.", home, "/"))
     write("/search/", layout(f"Search — {SITE}", "Search error messages.", '<h1>Search</h1><div id="results"><noscript>Search needs JavaScript. Browse <a href="/all/">all errors</a>.</noscript></div>', "/search/"))
     about = render_md(open(os.path.join(ROOT, "about.md")).read())
     write("/about/", layout(f"About — {SITE}", "About errorfix.", about, "/about/")); urls.append(("/about/", None))
     idx = [{"e": p["error"], "d": p["description"], "u": p["path"], "k": p.get("keywords", "")} for p in pages]
+    idx += [{"e": t["name"], "d": t["description"], "u": t["path"], "k": t.get("keywords", "")} for t in tools]
     json.dump(idx, open(os.path.join(OUT, "index.json"), "w"))
     today = datetime.date.today().isoformat()
     sm = "".join(f"<url><loc>{BASE}{u}</loc><lastmod>{d or today}</lastmod></url>" for u, d in urls)
     open(os.path.join(OUT, "sitemap.xml"), "w").write(f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{sm}</urlset>')
     open(os.path.join(OUT, "robots.txt"), "w").write(f"User-agent: *\nAllow: /\nSitemap: {BASE}/sitemap.xml\n")
     write404()
-    print(f"built {len(pages)} pages, {len(urls)} urls")
+    print(f"built {len(pages)} pages, {len(tools)} tools, {len(urls)} urls")
 
 def write404():
     open(os.path.join(OUT, "404.html"), "w").write(layout(f"Not found — {SITE}", "Page not found.", '<h1>Page not found</h1><p>Try the search above or browse <a href="/all/">all errors</a>.</p>', "/404"))

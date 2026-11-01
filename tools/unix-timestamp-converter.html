@@ -1,0 +1,10 @@
+<div class="now"><div><small>Now (seconds)</small><b id="ts-now-s"></b></div><div><small>Now (milliseconds)</small><b id="ts-now-ms"></b></div><div><small>ISO 8601 UTC</small><b id="ts-now-iso"></b></div></div>
+<h3>Timestamp → date</h3>
+<div class="row"><input type="text" id="ts-in" class="big grow" spellcheck="false" autocomplete="off" inputmode="numeric" aria-label="Unix timestamp"><button id="ts-usenow" class="sec">Now</button></div>
+<div id="ts-msg" class="msg" hidden></div>
+<table id="ts-out" class="kv"></table>
+<h3>Date → timestamp</h3>
+<div class="row"><input type="text" id="ts-date" class="big grow" spellcheck="false" autocomplete="off" aria-label="Date and time"></div>
+<div class="row"><label><input type="checkbox" id="ts-utc"> Interpret as UTC (otherwise your time zone: <span id="ts-tz"></span>)</label></div>
+<div id="ts-dmsg" class="msg" hidden></div>
+<table id="ts-dout" class="kv"></table>

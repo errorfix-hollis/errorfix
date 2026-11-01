@@ -1,0 +1,11 @@
+<label for="b64-in">Input</label>
+<textarea id="b64-in" spellcheck="false" placeholder="Text to encode, or Base64 to decode"></textarea>
+<div class="row">
+<button id="b64-enc">Encode</button><button id="b64-dec">Decode</button>
+<label><input type="checkbox" id="b64-url"> URL-safe (Base64URL, no padding)</label>
+<button id="b64-swap" class="sec">↕ Swap</button>
+</div>
+<div id="b64-msg" class="msg" hidden></div>
+<label for="b64-out">Output</label>
+<textarea id="b64-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="b64-copy" class="sec">Copy output</button></div>

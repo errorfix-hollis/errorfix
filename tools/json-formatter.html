@@ -1,0 +1,13 @@
+<label for="json-in">Paste JSON</label>
+<textarea id="json-in" spellcheck="false" placeholder='{"paste": "your JSON here"}'></textarea>
+<div class="row">
+<button id="json-fmt">Format</button><button id="json-min" class="sec">Minify</button>
+<label>Indent <select id="json-indent" class="inline"><option value="2">2 spaces</option><option value="4">4 spaces</option><option value="tab">Tab</option></select></label>
+<label><input type="checkbox" id="json-sort"> Sort keys</label>
+<button id="json-sample" class="sec">Broken example</button><button id="json-clear" class="sec">Clear</button>
+</div>
+<div id="json-msg" class="msg" hidden></div>
+<pre id="json-ctx" class="out ctx" hidden></pre>
+<label for="json-out">Output</label>
+<textarea id="json-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="json-copy" class="sec">Copy output</button></div>
