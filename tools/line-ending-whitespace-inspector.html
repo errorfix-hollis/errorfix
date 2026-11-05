@@ -1,0 +1,19 @@
+<label for="ws-in">Paste text, or open a file to check its real line endings and encoding</label>
+<textarea id="ws-in" spellcheck="false" placeholder="Paste code or config here"></textarea>
+<div class="row"><label>Open a file <input type="file" id="ws-file"></label><button id="ws-sample" class="sec">Example with problems</button></div>
+<div id="ws-msg" class="msg" hidden></div>
+<table id="ws-sum" class="kv"></table>
+<label>Visible whitespace <small>(→ tab, · trailing space, ␍␊ CRLF, ␊ LF, red = invisible or unusual character)</small></label>
+<pre id="ws-vis" class="out wsvis"></pre>
+<h3>Normalize</h3>
+<div class="row">
+<label>Line endings <select id="ws-eol" class="inline"><option value="lf">LF (Unix)</option><option value="crlf">CRLF (Windows)</option></select></label>
+<label>Tabs → spaces <select id="ws-tabs" class="inline"><option value="0">keep tabs</option><option value="2">2 spaces</option><option value="4" selected>4 spaces</option><option value="8">8 spaces</option></select></label>
+<label><input type="checkbox" id="ws-bom" checked> Remove BOM</label>
+<label><input type="checkbox" id="ws-trail" checked> Strip trailing whitespace</label>
+<label><input type="checkbox" id="ws-nbsp" checked> NBSP → space</label>
+<label><input type="checkbox" id="ws-zw" checked> Remove zero-width</label>
+<label><input type="checkbox" id="ws-smart"> Straighten smart quotes</label>
+<label><input type="checkbox" id="ws-final" checked> Single final newline</label>
+</div>
+<div class="row"><button id="ws-norm">Normalize</button><button id="ws-dl" class="sec">Download result</button><button id="ws-copy" class="sec">Copy</button></div>

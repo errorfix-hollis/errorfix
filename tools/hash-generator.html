@@ -1,0 +1,12 @@
+<label for="hash-in">Text to hash</label>
+<textarea id="hash-in" class="short" spellcheck="false" placeholder="Type or paste text"></textarea>
+<div class="row">
+<label>…or a file <input type="file" id="hash-file"></label>
+<button id="hash-text" class="sec">Hash the text instead</button>
+<label>Output <select id="hash-fmt" class="inline"><option value="hex">hex (lowercase)</option><option value="HEX">HEX (uppercase)</option><option value="b64">Base64</option></select></label>
+</div>
+<p class="small" id="hash-src"></p>
+<table id="hash-out" class="kv hash"></table>
+<label for="hash-exp">Compare with expected checksum <small>(paste from the download page, sha256sum output, or an SRI value)</small></label>
+<input type="text" id="hash-exp" class="big" spellcheck="false" autocomplete="off" placeholder="e.g. ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad">
+<div id="hash-msg" class="msg" hidden></div>

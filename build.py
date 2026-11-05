@@ -112,8 +112,8 @@ def build_tools(tools, pages, urls):
     body = f"""<p class="crumbs"><a href="/">Home</a></p><h1>Free developer tools</h1>
 <p class="lead">Small, fast tools for everyday debugging: formatters, converters and decoders. They run entirely in your browser, so nothing you paste ever leaves your machine. No sign-up, no ads.</p>
 <ul class="list big">{li}</ul>"""
-    write("/tools/", layout(f"Free online developer tools (JSON, cron, chmod, JWT, regex) — {SITE}",
-        "Free client-side developer tools: JSON formatter and validator, cron explainer, chmod calculator, Unix timestamp converter, Base64, URL encoder, JWT decoder and regex tester.",
+    write("/tools/", layout(f"Free online developer tools (JSON, YAML, diff, hash, UUID, cron, regex) — {SITE}",
+        "Free client-side developer tools: JSON and YAML validators, text diff, hash generator, UUID generator, HTTP status codes, cron explainer, chmod calculator, timestamp converter, Base64, URL encoder, JWT decoder, regex tester.",
         body, "/tools/", f'<script type="application/ld+json">{json.dumps(ld)}</script>'))
     urls.append(("/tools/", max(t["updated"] for t in tools)))
 

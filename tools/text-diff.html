@@ -1,0 +1,13 @@
+<div class="row two">
+<div><label for="diff-a">Original text</label><textarea id="diff-a" spellcheck="false" placeholder="Paste the original version"></textarea></div>
+<div><label for="diff-b">Changed text</label><textarea id="diff-b" spellcheck="false" placeholder="Paste the new version"></textarea></div>
+</div>
+<div class="row">
+<label>View <select id="diff-view" class="inline"><option value="side">Side by side</option><option value="unified">Unified (patch)</option></select></label>
+<label><input type="checkbox" id="diff-ws"> Ignore whitespace</label>
+<label><input type="checkbox" id="diff-case"> Ignore case</label>
+<label><input type="checkbox" id="diff-all"> Show all lines</label>
+<button id="diff-sample" class="sec">Example</button><button id="diff-swap" class="sec">Swap</button><button id="diff-copy" class="sec">Copy as patch</button>
+</div>
+<div id="diff-msg" class="msg" hidden></div>
+<div id="diff-out"></div>

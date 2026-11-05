@@ -1,0 +1,13 @@
+<label for="yaml-in">Paste YAML (or JSON to convert to YAML)</label>
+<textarea id="yaml-in" spellcheck="false" placeholder="key: value&#10;list:&#10;  - a&#10;  - b"></textarea>
+<div class="row">
+<button id="yaml-tojson">YAML → JSON</button><button id="yaml-toyaml">JSON → YAML</button>
+<label>Indent <select id="yaml-indent" class="inline"><option value="2">2 spaces</option><option value="4">4 spaces</option></select></label>
+<button id="yaml-sample" class="sec">Broken example</button><button id="yaml-swap" class="sec">Swap</button><button id="yaml-clear" class="sec">Clear</button>
+</div>
+<div id="yaml-msg" class="msg" hidden></div>
+<pre id="yaml-ctx" class="out ctx" hidden></pre>
+<ul id="yaml-warn" class="warn" hidden></ul>
+<label for="yaml-out">Output</label>
+<textarea id="yaml-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="yaml-copy" class="sec">Copy output</button></div>

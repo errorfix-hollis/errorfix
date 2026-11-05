@@ -1,0 +1,16 @@
+<h3>Generate UUIDs</h3>
+<div class="row">
+<label>Version <select id="uuid-ver" class="inline"><option value="4">v4 (random)</option><option value="7">v7 (time-ordered)</option></select></label>
+<label>How many <input type="number" id="uuid-n" class="num" min="1" max="1000" value="5"></label>
+<label><input type="checkbox" id="uuid-upper"> Uppercase</label>
+<label><input type="checkbox" id="uuid-nohy"> No hyphens</label>
+<label><input type="checkbox" id="uuid-braces"> {Braces}</label>
+<button id="uuid-gen">Generate</button>
+</div>
+<div id="uuid-msg" class="msg" hidden></div>
+<textarea id="uuid-out" spellcheck="false" readonly aria-label="Generated UUIDs"></textarea>
+<div class="row"><button id="uuid-copy" class="sec">Copy all</button><button id="uuid-use" class="sec">Inspect the first one</button></div>
+<h3>Validate and inspect a UUID</h3>
+<div class="row"><input type="text" id="uuid-in" class="big grow" spellcheck="false" autocomplete="off" placeholder="e.g. 017f22e2-79b0-7cc3-98c4-dc0c0c07398f" aria-label="UUID to inspect"></div>
+<div id="uuid-imsg" class="msg" hidden></div>
+<table id="uuid-info" class="kv"></table>

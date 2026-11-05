@@ -54,3 +54,16 @@ table.chmod td,table.chmod th{text-align:center}table.chmod input{width:18px;hei
 .hl mark{background:#ffe58a;color:#000;border-radius:2px}.hl mark.m1{background:var(--m2);color:inherit}.hl .zw{display:inline-block;width:2px;height:1em;background:var(--acc);vertical-align:middle}
 .small{font-size:14px;color:var(--mut)}.tools-line{line-height:2}
 @media (max-width:560px){.tool .row.two{grid-template-columns:1fr}}
+.tool input.num{width:80px;padding:4px 6px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.warn{font-size:14.5px;background:var(--code);border-radius:8px;padding:8px 12px 8px 28px;margin:8px 0}
+b.add,.udiff .add{color:var(--ok)}b.del,.udiff .del{color:var(--acc)}.udiff .hunk{color:var(--mut)}
+.dwrap{overflow-x:auto;border:1px solid var(--bd);border-radius:8px;margin:10px 0}
+table.diff{margin:0!important;font:13.5px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;table-layout:fixed;min-width:560px}
+table.diff td{border:0;padding:1px 6px;white-space:pre-wrap;word-break:break-all;vertical-align:top}table.diff col.cn{width:3.2em}
+table.diff td.ln{color:var(--mut);text-align:right;user-select:none;border-right:1px solid var(--bd)}
+tr.dch td:nth-child(2){background:var(--badbg)}tr.dadd td:nth-child(4),tr.dch td:nth-child(4){background:var(--okbg)}
+tr.ddel td:nth-child(2){background:var(--badbg)}tr.dch mark{background:rgba(255,180,0,.45);color:inherit;border-radius:2px}
+tr.dskip td{background:var(--code);color:var(--mut);text-align:center;font-family:system-ui,sans-serif;font-size:13px}
+table.http td{vertical-align:top;font-size:14.5px}table.http td:first-child{width:4em}.ns{font-size:12px;font-weight:600;background:var(--code);border:1px solid var(--bd);border-radius:4px;padding:0 5px;color:var(--mut)}
+.tool table.hash th{width:16%}.tool table.hash td.cp{width:70px}.tool table.hash code{word-break:break-all}.tool table.hash button{font-size:13px;padding:2px 8px}tr.hit td,tr.hit th{background:var(--okbg)}
+pre.wsvis{white-space:pre;tab-size:4;max-height:420px;overflow:auto}.wst{color:var(--mut)}.wss,.wse{color:var(--mut)}.tw{background:var(--badbg);color:var(--acc)}.wsx{background:var(--acc);color:#fff;border-radius:3px;font-size:11px;padding:0 2px;margin:0 1px}
