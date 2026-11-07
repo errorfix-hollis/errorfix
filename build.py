@@ -3,7 +3,7 @@
 import os, re, json, shutil, html, datetime, glob
 import markdown, yaml
 
-BASE = os.environ.get("BASE_URL", "https://errorfix.surge.sh")
+BASE = os.environ.get("BASE_URL", "https://errorfix-hollis.github.io")
 SITE = "errorfix"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(ROOT, "public")

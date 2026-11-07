@@ -1,6 +1,6 @@
 # errorfix
 
-Source for **[errorfix.surge.sh](https://errorfix.surge.sh)**: short, practical fixes for exact developer error messages (Git, npm/Node, Python, Docker, SSH, Linux, databases, Kubernetes and more), plus a few small client-side [developer tools](https://errorfix.surge.sh/tools/).
+Source for **[errorfix-hollis.github.io](https://errorfix-hollis.github.io)**: short, practical fixes for exact developer error messages (Git, npm/Node, Python, Docker, SSH, Linux, databases, Kubernetes and more), plus a few small client-side [developer tools](https://errorfix-hollis.github.io/tools/).
 
 - `content/*.md`: one page per error (YAML front matter + Markdown)
 - `tools/`: tool pages; logic in `static/tools.js`
