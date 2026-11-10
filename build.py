@@ -141,7 +141,15 @@ def main():
             rel = pr + [q for q in rel if q not in pr]
         rel = rel[:6]
         relhtml = "".join(f'<li><a href="{q["path"]}">{esc(q["error"])}</a></li>' for q in rel)
-        ttl = p.get("title") or f'{p["error"]} — how to fix'
+        tech = {"git": "Git", "npm": "Node.js", "python": "Python", "docker": "Docker", "ssh": "SSH", "linux": "Linux",
+                "javascript": "JavaScript", "java": "Java", "rust": "Rust", "go": "Go", "kubernetes": "Kubernetes"}.get(p["cat"], "")
+        if p["slug"].startswith("js-ts"): tech = "TypeScript"
+        if p["slug"].startswith("db-mysql"): tech = "MySQL"
+        if p["slug"].startswith("db-postgres"): tech = "PostgreSQL"
+        if p["slug"].startswith("web-nginx"): tech = "nginx"
+        low = p["error"].lower()
+        suffix = f" ({tech})" if tech and tech.lower() not in low and not (tech == "Node.js" and "npm" in low) else ""
+        ttl = p.get("title") or f'{p["error"]}{suffix} — how to fix'
         ld = {"@context": "https://schema.org", "@type": "TechArticle", "headline": ttl,
               "description": p["description"], "dateModified": p["updated"], "url": BASE + path,
               "author": {"@type": "Organization", "name": SITE}}
