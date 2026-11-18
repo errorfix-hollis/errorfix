@@ -10,7 +10,8 @@ New (batch 20): Spring "Web server failed to start"/"APPLICATION FAILED TO START
 New (batch 22): k8s "FailedDiscoveryCheck" / APIService MissingEndpoints; Postgres "InFailedSqlTransaction" alias
 New (batch 23): systemd "status=226/NAMESPACE"; Go "unknown directive: toolchain"; nginx "duplicate listen options"
 Left from batch 24: git "error: src refspec does not match" variants; Rust E0451 "field is private" in struct literal
-Left from batch 25: git "Could not resolve proxy"; Spring "Failed to convert value of type String to required type"
+Left from batch 25: Spring "Failed to convert value of type String to required type"
 New (batch 26, left): TS2739 "missing the following properties" (alias of TS2741); pip "No matching distribution found for torch" alias; Jackson "Cannot deserialize value of type ... from Array"
-Left from batch 27: Python "TypeError: 'tuple' object does not support item assignment" (alias); Python "No module named 'transformers'"; TS2588 cannot assign to because it is a constant; Java "Scanner nextLine skipped after nextInt"; React "Cannot update a component while rendering a different component"
-New (batch 28): Rust E0596 "cannot borrow as mutable, as it is not declared as mutable"; Docker "image has dependent child images"; Postgres "operator does not exist: integer = text"; Java "error: incompatible types"/"possible lossy conversion"; npm "sh: vite: not found"/"next: not found"; apt "Hash Sum mismatch"; apt "NO_PUBKEY" / "repository is not signed"; Go "index out of range" done -> Go "slice bounds out of range" alias; web "DNS_PROBE_FINISHED_NO_INTERNET"; k8s "error validating data: unknown field"
+Left from batch 27: Java "Scanner nextLine skipped after nextInt"
+Left from batch 28: Rust E0596 "cannot borrow as mutable, as it is not declared as mutable" (check overlap with rust-cannot-borrow-as-mutable)
+New (batch 29): apt "EXPKEYSIG"/"Release file is not valid yet"; Chrome "DNS_PROBE_FINISHED_NXDOMAIN"; Python "No module named 'langchain'"; Spring "Field required a bean of type that could not be found"; Postgres "value too long for type character varying"; Go "cannot use nil as type"; k8s "Readiness probe failed"; Docker "failed to read dockerfile"; JS "structuredClone is not defined"/"Unexpected token 'export'"
