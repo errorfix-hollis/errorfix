@@ -11,7 +11,8 @@ New (batch 22): k8s "FailedDiscoveryCheck" / APIService MissingEndpoints; Postgr
 New (batch 23): systemd "status=226/NAMESPACE"; Go "unknown directive: toolchain"; nginx "duplicate listen options"
 Left from batch 24: git "error: src refspec does not match" variants; Rust E0451 "field is private" in struct literal
 Left from batch 25: Spring "Failed to convert value of type String to required type"
-New (batch 26, left): TS2739 "missing the following properties" (alias of TS2741); pip "No matching distribution found for torch" alias; Jackson "Cannot deserialize value of type ... from Array"
+New (batch 26, left): TS2739 "missing the following properties" (alias of TS2741); pip "No matching distribution found for torch" alias
 Left from batch 27: Java "Scanner nextLine skipped after nextInt"
 Left from batch 28: Rust E0596 "cannot borrow as mutable, as it is not declared as mutable" (check overlap with rust-cannot-borrow-as-mutable)
-New (batch 29): apt "EXPKEYSIG"/"Release file is not valid yet"; Chrome "DNS_PROBE_FINISHED_NXDOMAIN"; Python "No module named 'langchain'"; Spring "Field required a bean of type that could not be found"; Postgres "value too long for type character varying"; Go "cannot use nil as type"; k8s "Readiness probe failed"; Docker "failed to read dockerfile"; JS "structuredClone is not defined"/"Unexpected token 'export'"
+Left from batch 29: apt "EXPKEYSIG"; Go "cannot use nil as type"; JS "structuredClone is not defined" (NXDOMAIN covered by web-err-name-not-resolved)
+New (batch 30): Chrome "ERR_CERT_COMMON_NAME_INVALID"; pandas "FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries"; npm "Missing script: dev"/"build" alias; TS2571 "Object is of type 'unknown'"; k8s "Liveness probe failed"; Go "no new variables on left side of :="; Python "AttributeError: 'Series' object has no attribute 'iteritems'"; Spring "Parameter 0 of constructor required a bean" alias; git "CONFLICT (modify/delete)"; Rust E0283 "type annotations needed: cannot satisfy"; ssh "Bad configuration option"
