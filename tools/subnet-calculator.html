@@ -1,0 +1,11 @@
+<label for="net-in">IPv4 or IPv6 address with prefix <small>(192.168.1.10/24, 10.0.0.5 255.255.255.0, 2001:db8::1/64)</small></label>
+<input type="text" id="net-in" class="big" spellcheck="false" autocomplete="off" value="192.168.1.10/24">
+<div class="row presets"><button class="sec" data-net="10.0.0.0/8">10.0.0.0/8</button><button class="sec" data-net="172.16.0.0/12">172.16.0.0/12</button><button class="sec" data-net="192.168.0.0/16">192.168.0.0/16</button><button class="sec" data-net="172.17.0.0/16">Docker bridge</button><button class="sec" data-net="10.244.0.0/16">k8s pods (flannel)</button><button class="sec" data-net="100.64.0.0/10">CGNAT</button><button class="sec" data-net="fe80::1/64">IPv6 link-local</button><button class="sec" data-net="2001:db8:abcd:12::/64">IPv6 /64</button></div>
+<div id="net-msg" class="msg" hidden></div>
+<table id="net-out" class="kv"></table>
+<h3>Does an address belong to this network?</h3>
+<div class="row"><input type="text" id="net-ip" class="grow" spellcheck="false" autocomplete="off" placeholder="IP address, or another CIDR to check for overlap, e.g. 192.168.1.200 or 192.168.0.0/23" aria-label="IP address or CIDR to check"></div>
+<div id="net-cmsg" class="msg" hidden></div>
+<h3>Split into smaller subnets</h3>
+<div class="row"><label>New prefix <select id="net-split" class="inline"></select></label><span class="small" id="net-scount"></span></div>
+<table id="net-subs" class="kv"></table>

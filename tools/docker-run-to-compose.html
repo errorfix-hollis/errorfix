@@ -1,0 +1,8 @@
+<label for="dr-in">Paste one or more <code>docker run</code> commands</label>
+<textarea id="dr-in" spellcheck="false" placeholder="docker run -d --name web -p 8080:80 -v ./html:/usr/share/nginx/html:ro --restart unless-stopped nginx:alpine"></textarea>
+<div class="row"><button id="dr-conv">Convert</button><button id="dr-sample" class="sec">Example</button><button id="dr-sample2" class="sec">Example: app + database</button></div>
+<div id="dr-msg" class="msg" hidden></div>
+<label for="dr-out">compose.yaml</label>
+<textarea id="dr-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="dr-copy" class="sec">Copy</button><button id="dr-dl" class="sec">Download compose.yaml</button></div>
+<ul id="dr-warn" class="warn" hidden></ul>

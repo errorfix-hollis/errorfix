@@ -1,0 +1,11 @@
+<label for="curl-in">Paste a curl command <small>(e.g. from your browser's DevTools: Network › right-click › Copy as cURL (bash))</small></label>
+<textarea id="curl-in" spellcheck="false" placeholder="curl -X POST https://api.example.com/items -H 'Content-Type: application/json' -d '{&quot;name&quot;:&quot;test&quot;}'"></textarea>
+<div class="row" id="curl-langs">
+<button data-lang="python">Python requests</button><button data-lang="fetch" class="sec">JavaScript fetch</button><button data-lang="axios" class="sec">Node.js axios</button><button data-lang="go" class="sec">Go net/http</button><button data-lang="php" class="sec">PHP cURL</button>
+<button id="curl-sample" class="sec">Example</button>
+</div>
+<div id="curl-msg" class="msg" hidden></div>
+<ul id="curl-warn" class="warn" hidden></ul>
+<pre class="out ctx"><code id="curl-out"></code></pre>
+<div class="row"><button id="curl-copy" class="sec">Copy code</button></div>
+<table id="curl-sum" class="kv"></table>

@@ -1145,6 +1145,2434 @@ T.decodeFileBytes = function (bytes) {
   return { enc: u.ok ? 'UTF-8' : 'not valid UTF-8 (probably Windows-1252/Latin-1 or binary)', text: u.ok ? u.text : new TextDecoder('windows-1252').decode(bytes), bom: false, invalid: !u.ok };
 };
 
+/* ---------------- SQL formatter ---------------- */
+var SQL_KW = ('SELECT FROM WHERE AND OR NOT IN IS NULL LIKE ILIKE BETWEEN EXISTS AS ON JOIN LEFT RIGHT INNER OUTER FULL CROSS NATURAL USING GROUP BY ORDER ' +
+  'HAVING LIMIT OFFSET UNION ALL DISTINCT INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW INDEX UNIQUE PRIMARY KEY FOREIGN REFERENCES DEFAULT ' +
+  'CONSTRAINT CHECK DROP ALTER ADD COLUMN RENAME TO IF REPLACE CASE WHEN THEN ELSE END ASC DESC WITH RECURSIVE RETURNING CONFLICT DO NOTHING DUPLICATE ' +
+  'INTERSECT EXCEPT MINUS OVER PARTITION WINDOW ROWS RANGE PRECEDING FOLLOWING UNBOUNDED CURRENT ROW FETCH FIRST NEXT ONLY TRUE FALSE AUTO_INCREMENT ' +
+  'AUTOINCREMENT CASCADE RESTRICT TRUNCATE TEMPORARY TEMP LATERAL APPLY FOR SHARE NULLS LAST BEGIN COMMIT ROLLBACK TRANSACTION GRANT REVOKE IGNORE ANY ' +
+  'SOME INTERVAL COLLATE ESCAPE SIMILAR REGEXP RLIKE QUALIFY ENGINE CHARSET CHARACTER TOP MATERIALIZED SCHEMA DATABASE TRIGGER PROCEDURE FUNCTION RETURNS ' +
+  'LANGUAGE FILTER WITHIN EXPLAIN ANALYZE SHOW DESCRIBE USE OF NO ACTION MODIFY CHANGE FIRST AFTER').split(' ');
+var SQL_FN = ('COUNT SUM AVG MIN MAX COALESCE NULLIF IFNULL ISNULL NVL CAST CONVERT CONCAT CONCAT_WS SUBSTRING SUBSTR LOWER UPPER TRIM LTRIM RTRIM LENGTH ' +
+  'CHAR_LENGTH ROUND FLOOR CEIL CEILING ABS NOW DATE_TRUNC DATE_FORMAT DATE_ADD DATE_SUB DATEADD DATEDIFF EXTRACT TO_CHAR TO_DATE TO_TIMESTAMP STRING_AGG ' +
+  'GROUP_CONCAT ARRAY_AGG JSON_AGG JSONB_AGG JSON_EXTRACT JSON_OBJECT JSON_BUILD_OBJECT ROW_NUMBER RANK DENSE_RANK NTILE LAG LEAD FIRST_VALUE LAST_VALUE ' +
+  'GREATEST LEAST POSITION REPLACE IIF UNNEST GENERATE_SERIES ' +
+  'INT INTEGER BIGINT SMALLINT TINYINT MEDIUMINT DECIMAL NUMERIC FLOAT DOUBLE REAL VARCHAR NVARCHAR CHAR NCHAR TEXT BOOLEAN BOOL DATE TIME TIMESTAMP ' +
+  'TIMESTAMPTZ DATETIME SERIAL BIGSERIAL UUID JSON JSONB BLOB BYTEA VARBINARY BINARY ENUM').split(' ');
+var SQL_KWS = {}, SQL_FNS = {};
+SQL_KW.forEach(function (k) { SQL_KWS[k] = 1; }); SQL_FN.forEach(function (k) { SQL_FNS[k] = 1; });
+var SQL_PHRASES = ['CREATE OR REPLACE VIEW', 'CREATE TABLE IF NOT EXISTS', 'CREATE TEMPORARY TABLE', 'CREATE UNIQUE INDEX', 'CREATE MATERIALIZED VIEW',
+  'DROP TABLE IF EXISTS', 'ON DUPLICATE KEY UPDATE', 'LEFT OUTER JOIN', 'RIGHT OUTER JOIN', 'FULL OUTER JOIN', 'INSERT IGNORE INTO', 'DO UPDATE SET',
+  'GROUP BY', 'ORDER BY', 'PARTITION BY', 'UNION ALL', 'UNION DISTINCT', 'INSERT INTO', 'REPLACE INTO', 'DELETE FROM', 'LEFT JOIN', 'RIGHT JOIN',
+  'FULL JOIN', 'INNER JOIN', 'CROSS JOIN', 'NATURAL JOIN', 'CROSS APPLY', 'OUTER APPLY', 'ON CONFLICT', 'CREATE TABLE', 'CREATE VIEW', 'CREATE INDEX',
+  'ALTER TABLE', 'DROP TABLE', 'DROP VIEW', 'DROP INDEX', 'TRUNCATE TABLE', 'PRIMARY KEY', 'FOREIGN KEY', 'NOT NULL', 'IS NOT', 'NOT IN', 'NOT LIKE',
+  'NOT EXISTS', 'NOT BETWEEN', 'ON DELETE', 'ON UPDATE', 'WITH RECURSIVE', 'SELECT DISTINCT', 'DO NOTHING', 'FETCH FIRST', 'FETCH NEXT', 'FOR UPDATE', 'FOR SHARE', 'UNION'
+].map(function (p) { return p.split(' '); }).sort(function (a, b) { return b.length - a.length; });
+var SQL_CLAUSE_BLOCK = { 'SELECT': 1, 'SELECT DISTINCT': 1, 'FROM': 1, 'WHERE': 1, 'GROUP BY': 1, 'ORDER BY': 1, 'HAVING': 1, 'SET': 1, 'VALUES': 1,
+  'RETURNING': 1, 'WITH': 1, 'WITH RECURSIVE': 1, 'WINDOW': 1, 'ON DUPLICATE KEY UPDATE': 1, 'DO UPDATE SET': 1, 'QUALIFY': 1 };
+var SQL_CLAUSE_INLINE = { 'LIMIT': 1, 'OFFSET': 1, 'INSERT INTO': 1, 'INSERT IGNORE INTO': 1, 'REPLACE INTO': 1, 'UPDATE': 1, 'DELETE FROM': 1, 'DELETE': 1,
+  'CREATE TABLE': 1, 'CREATE TABLE IF NOT EXISTS': 1, 'CREATE TEMPORARY TABLE': 1, 'CREATE VIEW': 1, 'CREATE OR REPLACE VIEW': 1, 'CREATE MATERIALIZED VIEW': 1,
+  'CREATE INDEX': 1, 'CREATE UNIQUE INDEX': 1, 'ALTER TABLE': 1, 'DROP TABLE': 1, 'DROP TABLE IF EXISTS': 1, 'DROP VIEW': 1, 'DROP INDEX': 1,
+  'TRUNCATE TABLE': 1, 'ON CONFLICT': 1, 'FETCH FIRST': 1, 'FETCH NEXT': 1, 'FOR UPDATE': 1, 'FOR SHARE': 1, 'DO NOTHING': 1 };
+var SQL_SETOP = { 'UNION': 1, 'UNION ALL': 1, 'UNION DISTINCT': 1, 'INTERSECT': 1, 'EXCEPT': 1, 'MINUS': 1 };
+var SQL_COMMA_BREAK = { 'SELECT': 1, 'SELECT DISTINCT': 1, 'GROUP BY': 1, 'ORDER BY': 1, 'SET': 1, 'VALUES': 1, 'RETURNING': 1, 'WITH': 1,
+  'WITH RECURSIVE': 1, '(columns)': 1, 'ON DUPLICATE KEY UPDATE': 1, 'DO UPDATE SET': 1, 'FROM': 1, 'WINDOW': 1 };
+
+T.sqlTokenize = function (s) {
+  var toks = [], i = 0, n = s.length, m;
+  function push(type, v) { toks.push({ t: type, v: v }); }
+  while (i < n) {
+    var c = s[i], rest;
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '-' && s[i + 1] === '-' || c === '#' && /^#(\s|$)/.test(s.substr(i, 2))) { var e = s.indexOf('\n', i); if (e < 0) e = n; push('lc', s.slice(i, e).replace(/\s+$/, '')); i = e; continue; }
+    if (c === '/' && s[i + 1] === '*') { var e2 = s.indexOf('*/', i + 2); e2 = e2 < 0 ? n : e2 + 2; push('bc', s.slice(i, e2)); i = e2; continue; }
+    if (c === "'" || ((c === 'N' || c === 'n' || c === 'E' || c === 'e' || c === 'X' || c === 'x' || c === 'B' || c === 'b') && s[i + 1] === "'" && !/[\w$]/.test(s[i - 1] || ''))) {
+      var j = c === "'" ? i + 1 : i + 2;
+      while (j < n) { if (s[j] === '\\') { j += 2; continue; } if (s[j] === "'") { if (s[j + 1] === "'") { j += 2; continue; } j++; break; } j++; }
+      if (j > n) j = n;
+      push('str', s.slice(i, j)); i = j; continue;
+    }
+    if (c === '$' && (m = /^\$([A-Za-z_]\w*)?\$/.exec(s.slice(i)))) {
+      var end = s.indexOf(m[0], i + m[0].length); end = end < 0 ? n : end + m[0].length;
+      push('str', s.slice(i, end)); i = end; continue;
+    }
+    if (c === '"' || c === '`' || c === '[') {
+      var close = c === '[' ? ']' : c, k = i + 1;
+      while (k < n) { if (s[k] === close) { if (s[k + 1] === close && c !== '[') { k += 2; continue; } k++; break; } k++; }
+      push('id', s.slice(i, k)); i = k; continue;
+    }
+    rest = s.slice(i, i + 64);
+    if ((m = /^(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?/.exec(rest)) && !/[A-Za-z_]/.test(s[i + m[0].length] || '')) { push('num', m[0]); i += m[0].length; continue; }
+    if ((m = /^[A-Za-z_\u00c0-\uffff][\w$\u00c0-\uffff]*/.exec(rest))) { push('word', m[0]); i += m[0].length; continue; }
+    if ((m = /^([@:]{1,2}[A-Za-z_][\w.]*|\$\d+|\?)/.exec(rest)) && !(c === ':' && s[i + 1] === ':' && toks.length && /^(word|id|str|num|close)$/.test(toks[toks.length - 1].t) && false)) {
+      if (!(c === ':' && s[i + 1] === ':')) { push('word', m[0]); i += m[0].length; continue; }
+    }
+    if ((m = /^(::|->>|->|<=>|<>|<=|>=|!=|\|\||&&|<<|>>|[-+*\/%=<>!~^&|])/.exec(rest))) { push('op', m[0]); i += m[0].length; continue; }
+    if (c === '(') { push('open', c); i++; continue; }
+    if (c === ')') { push('close', c); i++; continue; }
+    if (c === ',') { push('comma', c); i++; continue; }
+    if (c === ';') { push('semi', c); i++; continue; }
+    if (c === '.') { push('dot', c); i++; continue; }
+    push('op', c); i++;
+  }
+  // merge multi-word keyword phrases
+  var out = [];
+  for (var a = 0; a < toks.length; a++) {
+    var tk = toks[a];
+    if (tk.t === 'word') {
+      var U = tk.v.toUpperCase(), hit = null;
+      for (var p = 0; p < SQL_PHRASES.length && !hit; p++) {
+        var ph = SQL_PHRASES[p];
+        if (ph[0] !== U || ph.length < 2) continue;
+        var ok = true;
+        for (var q = 1; q < ph.length; q++) { var nt = toks[a + q]; if (!nt || nt.t !== 'word' || nt.v.toUpperCase() !== ph[q]) { ok = false; break; } }
+        if (ok) hit = ph;
+      }
+      if (hit) {
+        out.push({ t: 'kw', v: toks.slice(a, a + hit.length).map(function (x) { return x.v; }).join(' '), u: hit.join(' ') });
+        a += hit.length - 1; continue;
+      }
+      if (SQL_KWS[U] && toks[a - 1] && toks[a - 1].t === 'dot') { out.push(tk); continue; }
+      if (SQL_KWS[U] && !(SQL_FNS[U] && toks[a + 1] && toks[a + 1].t === 'open')) { out.push({ t: 'kw', v: tk.v, u: U }); continue; }
+      if (SQL_FNS[U]) { out.push({ t: 'fn', v: tk.v, u: U }); continue; }
+    }
+    out.push(tk);
+  }
+  return out;
+};
+
+function sqlCase(tk, mode) {
+  if (tk.t !== 'kw' && tk.t !== 'fn') return tk.v;
+  return mode === 'upper' ? tk.u : mode === 'lower' ? tk.u.toLowerCase() : tk.v;
+}
+
+T.sqlMinify = function (sql, opts) {
+  opts = opts || {};
+  var toks = T.sqlTokenize(sql).filter(function (t) { return t.t !== 'lc' && t.t !== 'bc'; }), out = '', prev = null;
+  toks.forEach(function (tk) {
+    var v = sqlCase(tk, opts.keywordCase || 'preserve');
+    if (prev) {
+      var tight = /^(open|close|comma|semi|dot)$/.test(tk.t) || /^(open|comma|semi|dot)$/.test(prev.t) || (tk.t === 'op' && prev.t !== 'op') || (prev.t === 'op' && tk.t !== 'op');
+      if (tk.t === 'open' && prev.t === 'kw') tight = false;
+      if (prev.t === 'close' && /^(kw|word|fn|num|str|id)$/.test(tk.t)) tight = false;
+      if (prev.t === 'semi') tight = false;
+      if (!tight) out += ' ';
+    }
+    out += v; prev = tk;
+  });
+  return out;
+};
+
+T.sqlFormat = function (sql, opts) {
+  opts = opts || {};
+  var unit = opts.indent === 'tab' ? '\t' : ' '.repeat(opts.indent === undefined ? 2 : +opts.indent);
+  var mode = opts.keywordCase || 'upper';
+  var toks = T.sqlTokenize(sql);
+  var lines = [], cur = '', curInd = 0, lineInd = 0, level = 0, clause = null, stack = [], between = false, prev = null, forceNL = false;
+  function nl(ind) { if (cur.trim()) lines.push(cur.replace(/\s+$/, '')); cur = unit.repeat(Math.max(0, ind)); curInd = lineInd = Math.max(0, ind); prev = null; forceNL = false; }
+  function top() { return stack[stack.length - 1]; }
+  function atClause() { var t = top(); return !t || t.type === 'block'; }
+  function inlineDepth() { var d = 0; for (var k = stack.length - 1; k >= 0 && stack[k].type !== 'block'; k--) if (stack[k].type === 'inline') d++; return d; }
+  function write(tk, v) {
+    if (forceNL) nl(curInd);
+    var sp = true;
+    if (!prev) sp = false;
+    else if (/^(comma|semi|close|dot)$/.test(tk.t)) sp = false;
+    else if (prev.t === 'open' || prev.t === 'dot') sp = false;
+    else if (tk.t === 'op' && tk.v === '::' || prev.t === 'op' && prev.v === '::') sp = false;
+    else if (prev.unary) sp = false;
+    else if (tk.t === 'open' && (prev.t === 'fn' || prev.t === 'word' || prev.t === 'id') && !(prev.t !== 'fn' && /^(INSERT|REPLACE|CREATE|INTO)/.test(clause || '') && !inlineDepth())) sp = false;
+    cur += (sp ? ' ' : '') + v;
+    prev = tk;
+  }
+  for (var i = 0; i < toks.length; i++) {
+    var tk = toks[i], v = sqlCase(tk, mode), U = tk.u || '', nx = toks[i + 1];
+    if (tk.t === 'lc') { if (prev) cur += ' ' + v; else cur += v; prev = tk; forceNL = true; continue; }
+    if (tk.t === 'semi') {
+      write(tk, ';'); stack = []; level = 0; clause = null; between = false;
+      if (i < toks.length - 1) { nl(0); lines.push(''); }
+      continue;
+    }
+    if (tk.t === 'kw' && atClause()) {
+      if (SQL_CLAUSE_BLOCK[U]) { nl(level); write(tk, v); nl(level + 1); clause = U; between = false; continue; }
+      if (SQL_CLAUSE_INLINE[U]) { nl(level); write(tk, v); curInd = level + 1; clause = U; continue; }
+      if (SQL_SETOP[U]) { nl(level); write(tk, v); nl(level); clause = null; continue; }
+      if (/JOIN$|APPLY$/.test(U)) { nl(level + 1); write(tk, v); curInd = level + 2; continue; }
+      if ((U === 'AND' || U === 'OR') && !between && clause && /^(WHERE|HAVING|FROM|QUALIFY|ON CONFLICT|DELETE FROM|UPDATE)$/.test(clause)) {
+        nl(clause === 'FROM' ? level + 2 : level + 1); write(tk, v); continue;
+      }
+    }
+    if (tk.t === 'kw' && (U === 'BETWEEN' || U === 'NOT BETWEEN')) { between = true; write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'AND' && between) { between = false; write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'CASE') { write(tk, v); stack.push({ type: 'case', base: lineInd }); continue; }
+    if (tk.t === 'kw' && (U === 'WHEN' || U === 'ELSE') && top() && top().type === 'case') { nl(top().base + 1); write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'END' && top() && top().type === 'case') { var cs = stack.pop(); nl(cs.base); write(tk, v); continue; }
+    if (tk.t === 'open') {
+      var la = nx, isSub = la && la.t === 'kw' && /^(SELECT|SELECT DISTINCT|WITH|WITH RECURSIVE|VALUES)$/.test(la.u) && !(la.u === 'VALUES' && true);
+      var isCols = !isSub && atClause() && clause && /^CREATE (TEMPORARY )?TABLE/.test(clause) && !stack.some(function (s) { return s.type === 'inline'; }) && prev && prev.t !== 'fn';
+      if (isSub || isCols) {
+        write(tk, '(');
+        stack.push({ type: 'block', level: level, clause: clause, ind: lineInd });
+        level = lineInd + 1; clause = isCols ? '(columns)' : null; nl(level);
+        continue;
+      }
+      write(tk, '('); stack.push({ type: 'inline' }); continue;
+    }
+    if (tk.t === 'close') {
+      while (top() && top().type === 'case') stack.pop();
+      var o = stack.pop();
+      if (o && o.type === 'block') { nl(o.ind); write(tk, ')'); level = o.level; clause = o.clause; curInd = o.ind; continue; }
+      write(tk, ')'); continue;
+    }
+    if (tk.t === 'comma') {
+      write(tk, ',');
+      if (atClause() && clause && SQL_COMMA_BREAK[clause]) nl(clause === '(columns)' ? level : level + 1);
+      continue;
+    }
+    if (tk.t === 'op' && (tk.v === '-' || tk.v === '+') && (!prev || /^(op|open|comma|kw)$/.test(prev.t)) && !(prev && prev.t === 'kw' && /^(END|NULL|TRUE|FALSE)$/.test(prev.u))) {
+      write(tk, v); prev = { t: 'op', v: tk.v, unary: true }; continue;
+    }
+    write(tk, v);
+  }
+  nl(0);
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+/* ---------------- Shell words (shared by cURL and docker run converters) ---------------- */
+// Splits a POSIX shell command line into words. Handles '...', "...", $'...', backslash escapes and
+// line continuations (\ , ^ and ` at end of line). Operators (&&, ||, ;, |, newline) become {op: '...'}.
+T.shellSplit = function (s) {
+  s = String(s).replace(/\r\n?/g, '\n').replace(/[ \t]*(\\|\^|`)\n/g, ' ');
+  var out = [], i = 0, n = s.length, w = null;
+  function add(ch) { w = (w === null ? '' : w) + ch; }
+  function end() { if (w !== null) { out.push(w); w = null; } }
+  while (i < n) {
+    var c = s[i];
+    if (c === ' ' || c === '\t') { end(); i++; continue; }
+    if (c === '\n' || c === ';' || c === '&' && s[i + 1] === '&' || c === '|') {
+      end();
+      var op = c === '\n' ? '\n' : c === ';' ? ';' : (s[i + 1] === c ? c + c : c);
+      out.push({ op: op }); i += op.length === 2 ? 2 : 1; continue;
+    }
+    if (c === '#' && w === null) { while (i < n && s[i] !== '\n') i++; continue; }
+    if (c === '\\') { if (i + 1 < n) add(s[i + 1]); i += 2; continue; }
+    if (c === "'") { var e = s.indexOf("'", i + 1); if (e < 0) e = n; add(s.slice(i + 1, e)); i = e + 1; continue; }
+    if (c === '$' && s[i + 1] === "'") {
+      i += 2; var buf = '';
+      while (i < n && s[i] !== "'") {
+        if (s[i] === '\\' && i + 1 < n) {
+          var x = s[i + 1], m;
+          var map = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+          if (map[x] !== undefined) { buf += map[x]; i += 2; }
+          else if ((m = /^x([0-9a-fA-F]{1,2})/.exec(s.slice(i + 1)))) { buf += String.fromCharCode(parseInt(m[1], 16)); i += 1 + m[0].length; }
+          else if ((m = /^u([0-9a-fA-F]{1,4})/.exec(s.slice(i + 1))) || (m = /^U([0-9a-fA-F]{1,8})/.exec(s.slice(i + 1)))) { buf += String.fromCodePoint(parseInt(m[1], 16)); i += 1 + m[0].length; }
+          else if ((m = /^[0-7]{1,3}/.exec(s.slice(i + 1)))) { buf += String.fromCharCode(parseInt(m[0], 8)); i += 1 + m[0].length; }
+          else { buf += '\\' + x; i += 2; }
+        } else buf += s[i++];
+      }
+      // $'...' strings may contain UTF-8 bytes written as \xHH: decode them
+      if (/[\x80-\xff]/.test(buf) && !/[^\x00-\xff]/.test(buf)) { try { buf = decodeURIComponent(escape(buf)); } catch (er) { /* keep */ } }
+      add(buf); i++; continue;
+    }
+    if (c === '"') {
+      i++; var b2 = '';
+      while (i < n && s[i] !== '"') {
+        if (s[i] === '\\' && i + 1 < n && '$`"\\\n'.indexOf(s[i + 1]) >= 0) { if (s[i + 1] !== '\n') b2 += s[i + 1]; i += 2; }
+        else b2 += s[i++];
+      }
+      add(b2); i++; continue;
+    }
+    add(c); i++;
+  }
+  end();
+  return out;
+};
+
+/* ---------------- cURL to code ---------------- */
+var CURL_VAL = { '-X': 'request', '--request': 'request', '-H': 'header', '--header': 'header', '-d': 'data', '--data': 'data', '--data-ascii': 'data',
+  '--data-raw': 'data-raw', '--data-binary': 'data-binary', '--data-urlencode': 'data-urlencode', '--json': 'json', '-u': 'user', '--user': 'user',
+  '-F': 'form', '--form': 'form', '--form-string': 'form-string', '-b': 'cookie', '--cookie': 'cookie', '-A': 'user-agent', '--user-agent': 'user-agent',
+  '-e': 'referer', '--referer': 'referer', '--url': 'url', '-m': 'max-time', '--max-time': 'max-time', '--connect-timeout': 'connect-timeout',
+  '-x': 'proxy', '--proxy': 'proxy', '-o': 'output', '--output': 'output', '-w': 'write-out', '--write-out': 'write-out', '-c': 'cookie-jar',
+  '--cookie-jar': 'cookie-jar', '--retry': 'retry', '--cacert': 'cacert', '-E': 'cert', '--cert': 'cert', '--key': 'key', '-T': 'upload-file',
+  '--upload-file': 'upload-file', '--oauth2-bearer': 'bearer', '-r': 'range', '--range': 'range', '--resolve': 'resolve', '--max-redirs': 'max-redirs',
+  '-K': 'config', '--config': 'config', '--aws-sigv4': 'aws', '--proxy-user': 'proxy-user', '-U': 'proxy-user', '--interface': 'interface',
+  '--limit-rate': 'limit-rate', '--retry-delay': 'retry-delay', '--retry-max-time': 'retry-max-time', '-D': 'dump-header', '--dump-header': 'dump-header',
+  '--trace': 'trace', '--trace-ascii': 'trace', '--stderr': 'stderr', '-Y': 'skip', '-y': 'skip', '-z': 'skip', '--expect100-timeout': 'skip' };
+var CURL_BOOL = { '-L': 'location', '--location': 'location', '-k': 'insecure', '--insecure': 'insecure', '--compressed': 'compressed', '-G': 'get', '--get': 'get',
+  '-I': 'head', '--head': 'head', '-s': 1, '--silent': 1, '-S': 1, '--show-error': 1, '-v': 1, '--verbose': 1, '-i': 1, '--include': 1, '-f': 'fail',
+  '--fail': 'fail', '--fail-with-body': 'fail', '-O': 'remote-name', '--remote-name': 'remote-name', '-#': 1, '--progress-bar': 1, '-N': 1, '--no-buffer': 1,
+  '--http1.1': 1, '--http2': 1, '--http1.0': 1, '--http2-prior-knowledge': 1, '--http3': 1, '-4': 1, '-6': 1, '--ipv4': 1, '--ipv6': 1, '-n': 1, '--netrc': 1,
+  '--location-trusted': 'location', '-g': 1, '--globoff': 1, '-q': 1, '--disable': 1, '--no-progress-meter': 1, '--digest': 'digest', '--basic': 1,
+  '--ntlm': 'ntlm', '--negotiate': 'ntlm', '-j': 1, '--junk-session-cookies': 1, '--tlsv1.2': 1, '--tlsv1.3': 1, '--path-as-is': 1, '-Z': 1, '--parallel': 1 };
+
+function curlUrlencode(s) { return encodeURIComponent(s).replace(/%20/g, '+').replace(/[!'()*]/g, function (c) { return '%' + c.charCodeAt(0).toString(16).toUpperCase(); }); }
+function hdrFind(h, name) { name = name.toLowerCase(); for (var k = 0; k < h.length; k++) if (h[k][0].toLowerCase() === name) return k; return -1; }
+
+T.curlParse = function (text) {
+  var words = T.shellSplit(String(text).trim().replace(/^\$\s+/, '')), r = { method: null, url: null, headers: [], data: [], form: [], auth: null, warnings: [],
+    insecure: false, follow: false, compressed: false, get: false, head: false, timeout: null, proxy: null, files: [], digest: false };
+  var k = 0;
+  while (k < words.length && (typeof words[k] !== 'string' || !/(^|\/)curl(\.exe)?$/i.test(words[k]))) k++;
+  if (k >= words.length) { if (typeof words[0] === 'string' && /^(https?|ftp):\/\//i.test(words[0])) k = -1; else throw new Error('No curl command found: paste a command that starts with "curl".'); }
+  var rest = [];
+  for (k = k + 1; k < words.length; k++) {
+    if (typeof words[k] !== 'string') {
+      if (words[k].op === '\n' && rest.length && !words.slice(k + 1).some(function (x) { return typeof x === 'string'; })) break;
+      if (words[k].op === '\n') { r.warnings.push('The command spans several lines without a trailing "\\": only the first line was used.'); break; }
+      r.warnings.push('Ignored everything after "' + words[k].op + '" (only the curl command itself is converted).'); break;
+    }
+    rest.push(words[k]);
+  }
+  var endOpts = false;
+  for (var i = 0; i < rest.length; i++) {
+    var a = rest[i], opt = null, val = null;
+    if (!endOpts && a === '--') { endOpts = true; continue; }
+    if (!endOpts && /^--[a-z0-9]/i.test(a)) {
+      var eq = null;
+      if (CURL_VAL[a]) opt = a;
+      else if (CURL_BOOL[a]) opt = a;
+      else if (/^--no-/.test(a)) { if (a === '--no-location') r.follow = false; continue; }
+      else { r.warnings.push('Unknown option ' + a + ' was ignored.'); continue; }
+      if (CURL_VAL[opt]) { val = rest[++i]; if (val === undefined) throw new Error('Option ' + opt + ' needs a value.'); }
+    } else if (!endOpts && /^-[^-]/.test(a) && a.length > 1) {
+      // short options may be combined (-sSL) and values may be attached (-XPOST, -HAccept:x)
+      for (var j = 1; j < a.length; j++) {
+        var f = '-' + a[j];
+        if (CURL_VAL[f]) { val = a.slice(j + 1) || rest[++i]; if (val === undefined) throw new Error('Option ' + f + ' needs a value.'); opt = f; break; }
+        if (CURL_BOOL[f]) { if (j < a.length - 1) applyCurl(r, f, null); else opt = f; continue; }
+        r.warnings.push('Unknown option ' + f + ' was ignored.');
+      }
+      if (!opt) continue;
+    } else {
+      if (!r.url) r.url = a; else r.warnings.push('Extra URL "' + a + '" ignored (only the first URL is converted).');
+      continue;
+    }
+    applyCurl(r, opt, val);
+  }
+  if (!r.url) throw new Error('No URL found in the curl command.');
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(r.url)) r.url = 'http://' + r.url;
+  // body
+  var body = null;
+  if (r.data.length) body = r.data.join('&');
+  if (r.get && body !== null) { r.url += (r.url.indexOf('?') >= 0 ? '&' : '?') + body; body = null; }
+  r.body = body;
+  if (!r.method) r.method = r.head ? 'HEAD' : (r.get ? 'GET' : (body !== null || r.form.length || r.uploadFile ? (r.uploadFile && !r.data.length ? 'PUT' : 'POST') : 'GET'));
+  r.method = r.method.toUpperCase();
+  var ct = hdrFind(r.headers, 'content-type');
+  if (body !== null && !r.form.length && ct < 0) { r.headers.push(['Content-Type', 'application/x-www-form-urlencoded']); r.implicitForm = true; }
+  ct = hdrFind(r.headers, 'content-type');
+  r.contentType = ct >= 0 ? r.headers[ct][1] : '';
+  r.json = undefined;
+  if (body !== null && /json/i.test(r.contentType)) { try { r.json = JSON.parse(body); } catch (e) { r.warnings.push('The body is sent as JSON but is not valid JSON: it is passed through as a raw string.'); } }
+  r.formPairs = null;
+  if (body !== null && /x-www-form-urlencoded/i.test(r.contentType) && !r.dataFile) {
+    var pairs = body.split('&').filter(Boolean).map(function (p) { var e = p.indexOf('='); var kk = e < 0 ? p : p.slice(0, e), vv = e < 0 ? '' : p.slice(e + 1);
+      try { return [decodeURIComponent(kk.replace(/\+/g, ' ')), decodeURIComponent(vv.replace(/\+/g, ' '))]; } catch (er) { return null; } });
+    if (pairs.length && pairs.every(Boolean)) r.formPairs = pairs;
+  }
+  if (r.form.length && ct >= 0 && /multipart/i.test(r.contentType)) { r.headers.splice(ct, 1); r.warnings.push('Removed the explicit multipart Content-Type header: the HTTP library must generate it with the boundary.'); }
+  return r;
+};
+
+function applyCurl(r, opt, val) {
+  var name = CURL_VAL[opt] || CURL_BOOL[opt], m;
+  switch (name) {
+    case 'request': r.method = val; break;
+    case 'header':
+      if (val.charAt(0) === '@') { r.warnings.push('Headers read from file ' + val.slice(1) + ' are not included.'); break; }
+      m = /^([^:;]+)(?::\s?(.*)|;)$/.exec(val);
+      if (!m) { r.warnings.push('Could not read header "' + val + '".'); break; }
+      if (m[2] === '' && val.indexOf(':') >= 0) { var ix = hdrFind(r.headers, m[1].trim()); if (ix >= 0) r.headers.splice(ix, 1); break; } // "X-Foo:" removes a header
+      r.headers.push([m[1].trim(), m[2] === undefined ? '' : m[2]]); break;
+    case 'data': case 'data-binary':
+      if (val.charAt(0) === '@') { r.dataFile = val.slice(1); r.warnings.push('The body is read from the file "' + val.slice(1) + '": the code below sends a placeholder, read the file yourself.'); r.data.push('<contents of ' + val.slice(1) + '>'); break; }
+      r.data.push(name === 'data' ? val.replace(/[\r\n]/g, '') && val : val); break;
+    case 'data-raw': r.data.push(val); break;
+    case 'data-urlencode':
+      m = /^([^=@]*)([=@])([\s\S]*)$/.exec(val);
+      if (!m) r.data.push(curlUrlencode(val));
+      else if (m[2] === '@') { r.dataFile = m[3]; r.warnings.push('--data-urlencode reads ' + m[3] + ' from a file: replace the placeholder.'); r.data.push((m[1] ? m[1] + '=' : '') + curlUrlencode('<contents of ' + m[3] + '>')); }
+      else r.data.push((m[1] ? m[1] + '=' : '') + curlUrlencode(m[3]));
+      break;
+    case 'json':
+      r.data.push(val);
+      if (hdrFind(r.headers, 'content-type') < 0) r.headers.push(['Content-Type', 'application/json']);
+      if (hdrFind(r.headers, 'accept') < 0) r.headers.push(['Accept', 'application/json']);
+      break;
+    case 'user': m = val.indexOf(':'); r.auth = m < 0 ? [val, ''] : [val.slice(0, m), val.slice(m + 1)]; if (m < 0) r.warnings.push('-u without a password: curl would prompt for it; the code uses an empty password.'); break;
+    case 'form': case 'form-string':
+      m = /^([^=]+)=([\s\S]*)$/.exec(val);
+      if (!m) { r.warnings.push('Could not read form field "' + val + '".'); break; }
+      var v = m[2], fld = { name: m[1], value: v };
+      if (name === 'form') {
+        var parts = v.split(';'), first = parts[0];
+        if (first.charAt(0) === '@' || first.charAt(0) === '<') { fld.file = first.slice(1); fld.value = null; if (first.charAt(0) === '<') { fld.file = null; fld.value = '<contents of ' + first.slice(1) + '>'; } }
+        else fld.value = first;
+        parts.slice(1).forEach(function (p) { var q = /^\s*(type|filename)=(.*)$/.exec(p); if (q) fld[q[1]] = q[2].replace(/^"|"$/g, ''); });
+      }
+      r.form.push(fld); break;
+    case 'cookie':
+      if (val.indexOf('=') < 0) { r.warnings.push('-b ' + val + ' reads cookies from a file: not converted.'); break; }
+      var ci = hdrFind(r.headers, 'cookie');
+      if (ci >= 0) r.headers[ci][1] += '; ' + val; else r.headers.push(['Cookie', val]);
+      break;
+    case 'user-agent': r.headers.push(['User-Agent', val]); break;
+    case 'referer': r.headers.push(['Referer', val.replace(/;auto$/, '')]); break;
+    case 'bearer': r.headers.push(['Authorization', 'Bearer ' + val]); break;
+    case 'range': r.headers.push(['Range', 'bytes=' + val]); break;
+    case 'url': if (!r.url) r.url = val; break;
+    case 'max-time': r.timeout = parseFloat(val); break;
+    case 'connect-timeout': if (r.timeout === null) r.timeout = parseFloat(val); break;
+    case 'proxy': r.proxy = /^[a-z0-9]+:\/\//i.test(val) ? val : 'http://' + val; break;
+    case 'location': r.follow = true; break;
+    case 'insecure': r.insecure = true; break;
+    case 'compressed': r.compressed = true; break;
+    case 'get': r.get = true; break;
+    case 'head': r.head = true; break;
+    case 'digest': r.digest = true; r.warnings.push('--digest authentication is converted as Basic auth: switch to your library\'s digest support.'); break;
+    case 'ntlm': r.warnings.push(opt + ' authentication is not converted.'); break;
+    case 'upload-file': r.uploadFile = val; r.data.push('<contents of ' + val + '>'); r.dataFile = val; r.warnings.push('-T uploads the file ' + val + ': the code sends a placeholder body, read the file yourself.'); break;
+    case 'output': case 'remote-name': r.warnings.push('Output to a file (' + opt + ') is not converted: write the response body yourself.'); break;
+    case 'cacert': case 'cert': case 'key': r.warnings.push(opt + ' ' + val + ' (client/CA certificates) is not converted.'); break;
+    case 'aws': r.warnings.push('--aws-sigv4 signing is not converted: use an AWS SDK.'); break;
+    case 'config': r.warnings.push('Options read from a config file (' + opt + ') are not included.'); break;
+    default: break; // silent / verbose / output formatting options don't change the request
+  }
+}
+
+/* code generators */
+function jstr(s) { return JSON.stringify(s); }
+function pystr(s) {
+  var q = s.indexOf("'") >= 0 && s.indexOf('"') < 0 ? '"' : "'";
+  return q + s.replace(/\\/g, '\\\\').replace(new RegExp(q, 'g'), '\\' + q).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, function (c) { return '\\x' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }) + q;
+}
+function phpstr(s) { return /[\n\r\t\x00-\x1f]/.test(s) ? '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, function (c) { return '\\x' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }) + '"' : "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'"; }
+function pyval(v, ind) {
+  ind = ind || '';
+  var nx = ind + '    ';
+  if (v === null) return 'None';
+  if (v === true) return 'True';
+  if (v === false) return 'False';
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') return pystr(v);
+  if (Array.isArray(v)) return v.length ? '[\n' + v.map(function (x) { return nx + pyval(x, nx); }).join(',\n') + ',\n' + ind + ']' : '[]';
+  var ks = Object.keys(v);
+  return ks.length ? '{\n' + ks.map(function (k) { return nx + pystr(k) + ': ' + pyval(v[k], nx); }).join(',\n') + ',\n' + ind + '}' : '{}';
+}
+function jsval(v, ind) { return JSON.stringify(v, null, 2).replace(/\n/g, '\n' + ind); }
+function phpval(v, ind) {
+  ind = ind || ''; var nx = ind + '    ';
+  if (v === null) return 'null';
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string') return phpstr(v);
+  if (Array.isArray(v)) return v.length ? '[\n' + v.map(function (x) { return nx + phpval(x, nx); }).join(',\n') + ',\n' + ind + ']' : '[]';
+  var ks = Object.keys(v);
+  return ks.length ? '[\n' + ks.map(function (k) { return nx + phpstr(k) + ' => ' + phpval(v[k], nx); }).join(',\n') + ',\n' + ind + ']' : 'new stdClass()';
+}
+function b64ascii(s) { try { return typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(s))) : Buffer.from(s, 'utf8').toString('base64'); } catch (e) { return ''; } }
+
+T.curlToPython = function (r) {
+  var L = ['import requests', ''], args = ['url'], hs = r.headers.slice(), cookies = null;
+  var ci = hdrFind(hs, 'cookie');
+  if (ci >= 0) { cookies = hs[ci][1].split(/;\s*/).filter(Boolean).map(function (p) { var e = p.indexOf('='); return [p.slice(0, e < 0 ? p.length : e).trim(), e < 0 ? '' : p.slice(e + 1)]; }); hs.splice(ci, 1); }
+  var useJson = r.json !== undefined, useForm = !useJson && r.formPairs && r.implicitForm;
+  if (useJson) { var ct = hdrFind(hs, 'content-type'); if (ct >= 0 && /^application\/json$/i.test(hs[ct][1].trim())) hs.splice(ct, 1); }
+  if (useForm) hs.splice(hdrFind(hs, 'content-type'), 1);
+  L.push('url = ' + pystr(r.url));
+  if (hs.length) { L.push('headers = {'); hs.forEach(function (h) { L.push('    ' + pystr(h[0]) + ': ' + pystr(h[1]) + ','); }); L.push('}'); args.push('headers=headers'); }
+  if (cookies) { L.push('cookies = {'); cookies.forEach(function (c) { L.push('    ' + pystr(c[0]) + ': ' + pystr(c[1]) + ','); }); L.push('}'); args.push('cookies=cookies'); }
+  if (r.body !== null) {
+    if (useJson) { L.push('json_data = ' + pyval(r.json)); args.push('json=json_data'); }
+    else if (useForm) {
+      var dup = {}, hasDup = r.formPairs.some(function (p) { if (dup[p[0]]) return true; dup[p[0]] = 1; return false; });
+      if (hasDup) { L.push('data = ['); r.formPairs.forEach(function (p) { L.push('    (' + pystr(p[0]) + ', ' + pystr(p[1]) + '),'); }); L.push(']'); }
+      else { L.push('data = {'); r.formPairs.forEach(function (p) { L.push('    ' + pystr(p[0]) + ': ' + pystr(p[1]) + ','); }); L.push('}'); }
+      args.push('data=data');
+    } else { L.push('data = ' + pystr(r.body)); args.push(/[^\x00-\x7f]/.test(r.body) ? "data=data.encode('utf-8')" : 'data=data'); }
+  }
+  if (r.form.length) {
+    var plain = r.form.filter(function (f) { return !f.file; }), files = r.form.filter(function (f) { return f.file; });
+    if (files.length) {
+      L.push('files = {');
+      files.forEach(function (f) { var fname = f.filename || f.file.split('/').pop(); L.push('    ' + pystr(f.name) + ': (' + pystr(fname) + ', open(' + pystr(f.file) + ", 'rb')" + (f.type ? ', ' + pystr(f.type) : '') + '),'); });
+      L.push('}'); args.push('files=files');
+    } else { args.push('files=files'); L.push('files = {'); plain.forEach(function (f) { L.push('    ' + pystr(f.name) + ': (None, ' + pystr(f.value) + '),'); }); L.push('}'); plain = []; }
+    if (plain.length) { L.push('data = {'); plain.forEach(function (f) { L.push('    ' + pystr(f.name) + ': ' + pystr(f.value) + ','); }); L.push('}'); args.push('data=data'); }
+  }
+  if (r.auth) args.push('auth=(' + pystr(r.auth[0]) + ', ' + pystr(r.auth[1]) + ')');
+  if (r.proxy) { L.push('proxies = {' + pystr('http') + ': ' + pystr(r.proxy) + ', ' + pystr('https') + ': ' + pystr(r.proxy) + '}'); args.push('proxies=proxies'); }
+  if (r.timeout) args.push('timeout=' + r.timeout);
+  if (r.insecure) args.push('verify=False');
+  if (r.method === 'HEAD' && r.follow) args.push('allow_redirects=True');
+  L.push('');
+  var fn = { GET: 'get', POST: 'post', PUT: 'put', PATCH: 'patch', DELETE: 'delete', HEAD: 'head', OPTIONS: 'options' }[r.method];
+  var call = fn ? 'requests.' + fn + '(' : 'requests.request(' + pystr(r.method) + ', ';
+  var one = call + args.join(', ') + ')';
+  L.push('response = ' + (one.length <= 88 ? one : call + '\n    ' + args.join(',\n    ') + ',\n)'));
+  L.push('print(response.status_code)', 'print(response.text)');
+  return L.join('\n') + '\n';
+};
+
+T.curlToFetch = function (r) {
+  var L = [], o = [], hs = r.headers.slice();
+  if (r.auth) hs.push(['Authorization', 'Basic ' + b64ascii(r.auth[0] + ':' + r.auth[1])]);
+  if (r.method !== 'GET') o.push('  method: ' + jstr(r.method));
+  if (hs.length) o.push('  headers: {\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') + '\n  }');
+  if (r.body !== null) o.push('  body: ' + (r.json !== undefined ? 'JSON.stringify(' + jsval(r.json, '  ') + ')' : r.formPairs && r.implicitForm ? 'new URLSearchParams(' + jsval(r.formPairs.reduce(function (a, p) { a.push(p); return a; }, []), '  ') + ')' : jstr(r.body)));
+  if (r.form.length) {
+    L.push('const form = new FormData();');
+    r.form.forEach(function (f) {
+      if (f.file) L.push('form.append(' + jstr(f.name) + ', fileInput.files[0], ' + jstr(f.filename || f.file.split('/').pop()) + '); // the file ' + f.file + ' (in Node 20+: await fs.openAsBlob(' + jstr(f.file) + '))');
+      else L.push('form.append(' + jstr(f.name) + ', ' + jstr(f.value) + ');');
+    });
+    L.push('');
+    o.push('  body: form');
+  }
+  if (r.timeout) o.push('  signal: AbortSignal.timeout(' + Math.round(r.timeout * 1000) + ')');
+  if (r.insecure) L.unshift('// -k/--insecure has no fetch equivalent in browsers. In Node you can (for testing only) run with NODE_TLS_REJECT_UNAUTHORIZED=0.');
+  if (hs.some(function (h) { return /^(cookie|user-agent|referer|host|accept-encoding|content-length|connection|origin)$/i.test(h[0]); })) L.unshift('// Note: browsers silently drop "forbidden" headers such as Cookie, User-Agent, Referer and Host. This runs as-is in Node 18+.');
+  if (r.proxy) L.unshift('// Proxy ' + r.proxy + ': fetch has no proxy option; in Node use undici\'s ProxyAgent as the "dispatcher" option.');
+  L.push('const response = await fetch(' + jstr(r.url) + (o.length ? ', {\n' + o.join(',\n') + '\n}' : '') + ');');
+  L.push('console.log(response.status);', 'console.log(await response.text());');
+  return L.join('\n') + '\n';
+};
+
+T.curlToAxios = function (r) {
+  var L = ['const axios = require("axios");'], o = [], pre = [], hs = r.headers.slice();
+  if (r.insecure) { L.push('const https = require("https");'); }
+  if (r.form.length) { L.push('const FormData = require("form-data");'); if (r.form.some(function (f) { return f.file; })) L.push('const fs = require("fs");'); }
+  L.push('');
+  if (r.form.length) {
+    pre.push('const form = new FormData();');
+    r.form.forEach(function (f) { pre.push('form.append(' + jstr(f.name) + ', ' + (f.file ? 'fs.createReadStream(' + jstr(f.file) + ')' : jstr(f.value)) + ');'); });
+    pre.push('');
+  }
+  o.push('  method: ' + jstr(r.method.toLowerCase()), '  url: ' + jstr(r.url));
+  if (r.form.length) o.push('  headers: {\n    ...form.getHeaders()' + (hs.length ? ',\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') : '') + '\n  }');
+  else if (hs.length) o.push('  headers: {\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') + '\n  }');
+  if (r.body !== null) o.push('  data: ' + (r.json !== undefined ? jsval(r.json, '  ') : jstr(r.body)));
+  if (r.form.length) o.push('  data: form');
+  if (r.auth) o.push('  auth: { username: ' + jstr(r.auth[0]) + ', password: ' + jstr(r.auth[1]) + ' }');
+  if (r.timeout) o.push('  timeout: ' + Math.round(r.timeout * 1000));
+  if (r.insecure) o.push('  httpsAgent: new https.Agent({ rejectUnauthorized: false })');
+  if (r.proxy) { var pm = /^(\w+):\/\/(?:([^:@]*)(?::([^@]*))?@)?([^:\/]+)(?::(\d+))?/.exec(r.proxy); if (pm) o.push('  proxy: { protocol: ' + jstr(pm[1]) + ', host: ' + jstr(pm[4]) + ', port: ' + (pm[5] || (pm[1] === 'https' ? 443 : 1080)) + (pm[2] ? ', auth: { username: ' + jstr(decodeURIComponent(pm[2])) + ', password: ' + jstr(decodeURIComponent(pm[3] || '')) + ' }' : '') + ' }'); }
+  return L.concat(pre).join('\n') + 'axios({\n' + o.join(',\n') + '\n})\n  .then((response) => {\n    console.log(response.status);\n    console.log(response.data);\n  })\n  .catch((error) => console.error(error.response ? error.response.status : error.message));\n';
+};
+
+T.curlToGo = function (r) {
+  var imp = { 'fmt': 1, 'io': 1, 'net/http': 1 }, B = [];
+  var bodyVar = 'nil';
+  if (r.body !== null) { imp.strings = 1; bodyVar = 'body'; B.push('\tbody := strings.NewReader(' + (r.body.indexOf('`') < 0 && /\n/.test(r.body) ? '`' + r.body + '`' : jstr(r.body)) + ')'); }
+  if (r.form.length) {
+    imp.bytes = 1; imp['mime/multipart'] = 1; bodyVar = 'payload';
+    B.push('\tpayload := &bytes.Buffer{}', '\twriter := multipart.NewWriter(payload)');
+    r.form.forEach(function (f) {
+      if (f.file) {
+        imp.os = 1; imp['path/filepath'] = 1;
+        B.push('\t{', '\t\tf, err := os.Open(' + jstr(f.file) + ')', '\t\tif err != nil {', '\t\t\tpanic(err)', '\t\t}', '\t\tdefer f.Close()',
+          '\t\tpart, err := writer.CreateFormFile(' + jstr(f.name) + ', ' + (f.filename ? jstr(f.filename) : 'filepath.Base(' + jstr(f.file) + ')') + ')', '\t\tif err != nil {', '\t\t\tpanic(err)', '\t\t}',
+          '\t\tif _, err := io.Copy(part, f); err != nil {', '\t\t\tpanic(err)', '\t\t}', '\t}');
+      } else B.push('\t_ = writer.WriteField(' + jstr(f.name) + ', ' + jstr(f.value) + ')');
+    });
+    B.push('\twriter.Close()');
+  }
+  B.push('', '\treq, err := http.NewRequest(' + jstr(r.method) + ', ' + jstr(r.url) + ', ' + bodyVar + ')', '\tif err != nil {', '\t\tpanic(err)', '\t}');
+  r.headers.forEach(function (h) { B.push('\treq.Header.' + (h[0].toLowerCase() === 'host' ? 'Set' : 'Set') + '(' + jstr(h[0]) + ', ' + jstr(h[1]) + ')'); });
+  if (hdrFind(r.headers, 'host') >= 0) B.push('\treq.Host = req.Header.Get("Host")');
+  if (r.form.length) B.push('\treq.Header.Set("Content-Type", writer.FormDataContentType())');
+  if (r.auth) B.push('\treq.SetBasicAuth(' + jstr(r.auth[0]) + ', ' + jstr(r.auth[1]) + ')');
+  var cl = [];
+  if (r.timeout) { imp.time = 1; cl.push('\t\tTimeout: ' + (r.timeout >= 1 && r.timeout === Math.round(r.timeout) ? r.timeout + ' * time.Second' : Math.round(r.timeout * 1000) + ' * time.Millisecond') + ','); }
+  if (r.insecure || r.proxy) {
+    var tr = [];
+    if (r.insecure) { imp['crypto/tls'] = 1; tr.push('\t\t\tTLSClientConfig: &tls.Config{InsecureSkipVerify: true},'); }
+    if (r.proxy) { imp['net/url'] = 1; B.push('\tproxyURL, _ := url.Parse(' + jstr(r.proxy) + ')'); tr.push('\t\t\tProxy:' + (r.insecure ? '           ' : ' ') + 'http.ProxyURL(proxyURL),'); }
+    cl.push('\t\tTransport: &http.Transport{\n' + tr.join('\n') + '\n\t\t},');
+  }
+  B.push('', cl.length ? '\tclient := &http.Client{\n' + cl.join('\n') + '\n\t}' : '\tclient := &http.Client{}');
+  B.push('\tresp, err := client.Do(req)', '\tif err != nil {', '\t\tpanic(err)', '\t}', '\tdefer resp.Body.Close()', '', '\trespBody, err := io.ReadAll(resp.Body)', '\tif err != nil {', '\t\tpanic(err)', '\t}',
+    '\tfmt.Println(resp.Status)', '\tfmt.Println(string(respBody))');
+  var imports = Object.keys(imp).sort();
+  return 'package main\n\nimport (\n' + imports.map(function (x) { return '\t"' + x + '"'; }).join('\n') + '\n)\n\nfunc main() {\n' + B.join('\n').replace(/^\n/, '') + '\n}\n';
+};
+
+T.curlToPhp = function (r) {
+  var L = ['<?php', '', '$ch = curl_init();', 'curl_setopt($ch, CURLOPT_URL, ' + phpstr(r.url) + ');', 'curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);'];
+  if (r.method === 'HEAD') L.push('curl_setopt($ch, CURLOPT_NOBODY, true);');
+  else if (r.method !== 'GET' && !(r.method === 'POST' && (r.body !== null || r.form.length))) L.push('curl_setopt($ch, CURLOPT_CUSTOMREQUEST, ' + phpstr(r.method) + ');');
+  if (r.headers.length) { L.push('curl_setopt($ch, CURLOPT_HTTPHEADER, ['); r.headers.forEach(function (h) { L.push('    ' + phpstr(h[0] + ': ' + h[1]) + ','); }); L.push(']);'); }
+  if (r.body !== null) L.push('curl_setopt($ch, CURLOPT_POSTFIELDS, ' + phpstr(r.body) + ');');
+  if (r.form.length) {
+    L.push('curl_setopt($ch, CURLOPT_POSTFIELDS, [');
+    r.form.forEach(function (f) { L.push('    ' + phpstr(f.name) + ' => ' + (f.file ? 'new CURLFile(' + phpstr(f.file) + (f.type || f.filename ? ', ' + phpstr(f.type || '') + (f.filename ? ', ' + phpstr(f.filename) : '') : '') + ')' : phpstr(f.value)) + ','); });
+    L.push(']);');
+  }
+  if (r.auth) L.push('curl_setopt($ch, CURLOPT_USERPWD, ' + phpstr(r.auth[0] + ':' + r.auth[1]) + ');');
+  if (r.digest) L.push('curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);');
+  if (r.follow) L.push('curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);');
+  if (r.compressed) L.push("curl_setopt($ch, CURLOPT_ENCODING, ''); // --compressed: accept and decode gzip/deflate/br");
+  if (r.insecure) L.push('curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);', 'curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);');
+  if (r.timeout) L.push('curl_setopt($ch, CURLOPT_TIMEOUT, ' + Math.ceil(r.timeout) + ');');
+  if (r.proxy) L.push('curl_setopt($ch, CURLOPT_PROXY, ' + phpstr(r.proxy) + ');');
+  L.push('', '$response = curl_exec($ch);', 'if ($response === false) {', "    echo 'cURL error: ' . curl_error($ch) . PHP_EOL;", '} else {',
+    '    echo curl_getinfo($ch, CURLINFO_HTTP_CODE) . PHP_EOL;', '    echo $response . PHP_EOL;', '}', 'curl_close($ch);');
+  return L.join('\n') + '\n';
+};
+T.CURL_LANGS = { python: T.curlToPython, fetch: T.curlToFetch, axios: T.curlToAxios, go: T.curlToGo, php: T.curlToPhp };
+/* ---------------- .gitignore generator & tester ---------------- */
+T.GITIGNORE = {
+  Node: { label: 'Node.js / npm / Yarn / pnpm', body: '# Dependencies\nnode_modules/\njspm_packages/\n.pnpm-store/\n\n# Logs\nlogs/\n*.log\nnpm-debug.log*\nyarn-debug.log*\nyarn-error.log*\npnpm-debug.log*\n\n# Build output and caches\ndist/\nbuild/\ncoverage/\n.nyc_output/\n.cache/\n.parcel-cache/\n.next/\n.nuxt/\n.svelte-kit/\n.turbo/\n.vite/\n.eslintcache\n*.tsbuildinfo\n\n# Yarn Berry (keep the files that should be committed)\n.yarn/*\n!.yarn/patches\n!.yarn/plugins\n!.yarn/releases\n!.yarn/sdks\n!.yarn/versions\n.pnp.*\n\n# Environment files (commit a .env.example instead)\n.env\n.env.*\n!.env.example' },
+  Python: { label: 'Python', body: '# Byte-compiled files\n__pycache__/\n*.py[cod]\n*$py.class\n\n# Virtual environments\n.venv/\nvenv/\nenv/\nENV/\n\n# Packaging\nbuild/\ndist/\n*.egg-info/\n.eggs/\nwheels/\n*.egg\n\n# Test, type-check and lint caches\n.pytest_cache/\n.coverage\n.coverage.*\nhtmlcov/\n.tox/\n.nox/\n.mypy_cache/\n.ruff_cache/\n.pytype/\n\n# Jupyter\n.ipynb_checkpoints/\n\n# Environment files\n.env\n.env.*\n!.env.example' },
+  Java: { label: 'Java (Maven / Gradle)', body: '# Compiled classes and packages\n*.class\n*.jar\n*.war\n*.ear\n*.nar\nhs_err_pid*\nreplay_pid*\n\n# Maven\ntarget/\npom.xml.tag\npom.xml.releaseBackup\npom.xml.versionsBackup\nrelease.properties\n.mvn/timing.properties\n!.mvn/wrapper/maven-wrapper.jar\n\n# Gradle\n.gradle/\nbuild/\n!gradle/wrapper/gradle-wrapper.jar\n\n# Eclipse / NetBeans\n.classpath\n.project\n.settings/\nbin/\nnbproject/private/' },
+  Go: { label: 'Go', body: '# Binaries\n*.exe\n*.exe~\n*.dll\n*.so\n*.dylib\n\n# Test binaries and coverage\n*.test\n*.out\ncoverage.*\n\n# Workspace file (usually local)\ngo.work\ngo.work.sum\n\n# Vendored dependencies (remove this line if you commit vendor/)\n# vendor/' },
+  Rust: { label: 'Rust / Cargo', body: '# Build output\ntarget/\n\n# Backup files from rustfmt\n**/*.rs.bk\n\n# Debug info on Windows\n*.pdb\n\n# Libraries usually do not commit Cargo.lock; applications should.\n# Cargo.lock' },
+  Docker: { label: 'Docker', body: '# Local overrides and secrets\ndocker-compose.override.yml\ncompose.override.yaml\n.env\n\n# Data volumes mounted into the project folder\n.docker-data/' },
+  Terraform: { label: 'Terraform', body: '# Local state and provider plugins\n.terraform/\n*.tfstate\n*.tfstate.*\ncrash.log\ncrash.*.log\n\n# Variable files often contain secrets\n*.tfvars\n*.tfvars.json\n\n# Local overrides\noverride.tf\noverride.tf.json\n*_override.tf\n*_override.tf.json\n.terraformrc\nterraform.rc\n\n# Commit .terraform.lock.hcl: it pins provider versions' },
+  PHP: { label: 'PHP / Composer', body: '# Composer\nvendor/\ncomposer.phar\n\n# Framework caches (Laravel / Symfony)\n.phpunit.result.cache\n.php-cs-fixer.cache\nstorage/*.key\nvar/cache/\nvar/log/\n\n# Environment files\n.env\n.env.*\n!.env.example' },
+  Ruby: { label: 'Ruby / Rails', body: '# Bundler\n.bundle/\nvendor/bundle/\n\n# Rails\nlog/*\ntmp/*\n!log/.keep\n!tmp/.keep\nstorage/*\n!storage/.keep\npublic/assets/\n/config/master.key\n\n# Gems\n*.gem\ncoverage/' },
+  DotNet: { label: '.NET / C#', body: '# Build output\n[Bb]in/\n[Oo]bj/\n[Dd]ebug/\n[Rr]elease/\nx64/\nx86/\n[Ll]og/\n\n# Visual Studio\n.vs/\n*.user\n*.suo\n*.userprefs\n\n# NuGet\n*.nupkg\n*.snupkg\npackages/\n!**/packages/build/\n\n# Test results\nTestResults/\n[Tt]est[Rr]esult*/' },
+  Android: { label: 'Android', body: '# Gradle and build output\n.gradle/\nbuild/\n/captures\n.externalNativeBuild/\n.cxx/\n\n# Local configuration (SDK path)\nlocal.properties\n\n# Android Studio\n*.iml\n.idea/\n\n# Signing keys: never commit these\n*.jks\n*.keystore\n\n# Generated files\n*.apk\n*.aab\n*.ap_\n*.dex\noutput-metadata.json' },
+  macOS: { label: 'macOS', body: '# macOS Finder and system files\n.DS_Store\n.AppleDouble\n.LSOverride\n._*\n.Spotlight-V100\n.Trashes\n.fseventsd\n.DocumentRevisions-V100\n.TemporaryItems\n.VolumeIcon.icns' },
+  Windows: { label: 'Windows', body: '# Windows thumbnail and folder files\nThumbs.db\nThumbs.db:encryptable\nehthumbs.db\nehthumbs_vista.db\ndesktop.ini\n$RECYCLE.BIN/\n\n# Windows shortcuts\n*.lnk\n\n# Installer caches\n*.stackdump' },
+  Linux: { label: 'Linux', body: '# Editor backup and temporary files\n*~\n.fuse_hidden*\n.directory\n.Trash-*\n.nfs*' },
+  VSCode: { label: 'VS Code', body: '# VS Code: ignore personal settings but keep shared ones\n.vscode/*\n!.vscode/settings.json\n!.vscode/tasks.json\n!.vscode/launch.json\n!.vscode/extensions.json\n!.vscode/*.code-snippets\n.history/\n*.vsix' },
+  JetBrains: { label: 'JetBrains (IntelliJ, PyCharm, WebStorm…)', body: '# JetBrains IDEs\n.idea/\n*.iml\n*.ipr\n*.iws\nout/\n.idea_modules/\n\n# If you share run configurations, use these instead of ignoring .idea/ entirely:\n# .idea/workspace.xml\n# .idea/tasks.xml\n# .idea/usage.statistics.xml' },
+  Vim: { label: 'Vim / Emacs', body: '# Vim swap, undo and session files\n[._]*.s[a-v][a-z]\n!*.svg\n[._]*.sw[a-p]\n[._]s[a-rt-v][a-z]\n[._]ss[a-gi-z]\n[._]sw[a-p]\nSession.vim\nSessionx.vim\n.netrwhist\ntags\n[._]*.un~\n\n# Emacs\n*~\n\\#*\\#\n.\\#*' },
+  Secrets: { label: 'Secrets & keys (recommended)', body: '# Private keys and credentials: never commit these\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa\nid_ed25519\n*.secret\nsecrets.*\n!secrets.example.*\n.env\n.env.*\n!.env.example' }
+};
+
+// Combine templates and drop duplicate patterns, unless a "!" rule in between could make the order matter.
+T.gitignoreCombine = function (names, extra) {
+  var out = [], seen = {};
+  names.forEach(function (n) {
+    var t = T.GITIGNORE[n]; if (!t) return;
+    out.push('### ' + t.label + ' ###');
+    t.body.split(/\n\s*\n/).forEach(function (block) {
+      var lines = block.split('\n'), kept = [], pats = 0, dropped = 0;
+      lines.forEach(function (line) {
+        var pat = line.trim();
+        if (!pat || pat.charAt(0) === '#') { kept.push(line); return; }
+        pats++;
+        if (pat.charAt(0) === '!') { Object.keys(seen).forEach(function (k) { seen[k].push(pat.slice(1)); }); kept.push(line); return; }
+        if (seen[pat] && !seen[pat].some(function (neg) { return T.gitignoreCheck(pat, neg).ignored || T.gitignoreCheck(neg, pat.replace(/\/$/, '')).ignored; })) { dropped++; return; }
+        seen[pat] = []; kept.push(line);
+      });
+      if (pats && dropped === pats) return;
+      out.push(kept.join('\n'), '');
+    });
+  });
+  if (extra && extra.trim()) out.push('### Custom ###', extra.trim(), '');
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
+};
+
+// Compile one gitignore pattern into a matcher, following git's wildmatch rules.
+function giGlobToRe(p) {
+  var re = '', i = 0, n = p.length;
+  while (i < n) {
+    var c = p[i];
+    if (c === '*') {
+      if (p[i + 1] === '*') {
+        var atStart = i === 0 || p[i - 1] === '/', j = i; while (p[j] === '*') j++;
+        var atEnd = j === n || p[j] === '/';
+        if (atStart && atEnd) {
+          if (j === n) { re += i === 0 ? '.*' : '.*'; i = j; continue; }          // "**" at end: everything inside
+          re += '(?:.*/)?'; i = j + 1; continue;                                   // "**/": zero or more directories
+        }
+        re += '[^/]*'; i = j; continue;
+      }
+      re += '[^/]*'; i++; continue;
+    }
+    if (c === '?') { re += '[^/]'; i++; continue; }
+    if (c === '[') {
+      var k = i + 1, cls = '';
+      if (p[k] === '!' || p[k] === '^') { cls = '^'; k++; }
+      if (p[k] === ']') { cls += '\\]'; k++; }
+      while (k < n && p[k] !== ']') {
+        if (p[k] === '\\' && k + 1 < n) { cls += '\\' + p[k + 1]; k += 2; continue; }
+        if (p[k] === '[' && p[k + 1] === ':') { var e = p.indexOf(':]', k + 2); if (e > 0) { var nm = p.slice(k + 2, e); cls += ({ alpha: 'a-zA-Z', digit: '0-9', alnum: 'a-zA-Z0-9', upper: 'A-Z', lower: 'a-z', space: '\\s', xdigit: '0-9a-fA-F', punct: '!-\\/:-@\\[-`{-~' })[nm] || ''; k = e + 2; continue; } }
+        cls += /[\]\\^]/.test(p[k]) ? '\\' + p[k] : p[k]; k++;
+      }
+      if (k >= n) { re += '\\['; i++; continue; }  // unterminated class: literal "["
+      re += cls.charAt(0) === '^' ? '(?![/])[' + cls + ']' : '[' + cls + ']'; i = k + 1; continue;
+    }
+    if (c === '\\' && i + 1 < n) { re += p[i + 1].replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); i += 2; continue; }
+    re += c.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); i++;
+  }
+  return re;
+}
+
+T.gitignoreParse = function (text) {
+  var rules = [];
+  String(text).replace(/\r\n?/g, '\n').split('\n').forEach(function (raw, idx) {
+    var line = raw;
+    // trailing spaces are ignored unless escaped with a backslash
+    line = line.replace(/((?:\\\\)*)(\\?) +$/, function (m, bs, esc1) { return bs + (esc1 ? ' ' : ''); });
+    if (!line || line.charAt(0) === '#') return;
+    var neg = false;
+    if (line.charAt(0) === '!') { neg = true; line = line.slice(1); }
+    else if (line.slice(0, 2) === '\\!' || line.slice(0, 2) === '\\#') line = line.slice(1);
+    if (!line) return;
+    var dirOnly = false;
+    if (/[^\\]\/$|^\/$/.test(line)) { dirOnly = true; line = line.replace(/\/+$/, ''); }
+    if (!line) return;
+    var anchored = line.indexOf('/') >= 0;
+    if (line.charAt(0) === '/') line = line.slice(1);
+    var re = giGlobToRe(line);
+    rules.push({ line: idx + 1, text: raw.replace(/\s+$/, ''), neg: neg, dirOnly: dirOnly, anchored: anchored, re: new RegExp('^' + re + '$') });
+  });
+  return rules;
+};
+
+function giMatchOne(rules, path, isDir) {
+  var base = path.slice(path.lastIndexOf('/') + 1), hit = null;
+  for (var i = rules.length - 1; i >= 0; i--) {
+    var r = rules[i];
+    if (r.dirOnly && !isDir) continue;
+    if (r.anchored ? r.re.test(path) : r.re.test(base)) { hit = r; break; }
+  }
+  return hit;
+}
+
+// Is a path ignored? Mirrors git: a path inside an ignored directory is ignored, and cannot be re-included by a later "!" rule.
+T.gitignoreCheck = function (rules, path) {
+  if (typeof rules === 'string') rules = T.gitignoreParse(rules);
+  var p = String(path).replace(/^\s+|[\r\n]+$/g, '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  var isDir = /\/$/.test(p); p = p.replace(/\/+$/, '').replace(/\/{2,}/g, '/');
+  if (!p) return { ignored: false, rule: null, path: p };
+  var parts = p.split('/');
+  for (var d = 1; d < parts.length; d++) {
+    var dir = parts.slice(0, d).join('/'), h = giMatchOne(rules, dir, true);
+    if (h && !h.neg) return { ignored: true, rule: h, path: p, via: dir + '/', isDir: isDir };
+  }
+  var hit = giMatchOne(rules, p, isDir);
+  return { ignored: !!(hit && !hit.neg), rule: hit, path: p, isDir: isDir };
+};
+/* ---------------- CSV <-> JSON ---------------- */
+// RFC 4180 parser: quoted fields, "" escapes, delimiters and line breaks inside quotes, CRLF/LF/CR line endings.
+T.csvParse = function (text, delim, limit) {
+  var s = String(text), rows = [], row = [], f = '', i = 0, n = s.length, q = false, quotedField = false, warn = [];
+  if (s.charCodeAt(0) === 0xfeff) i = 1;
+  delim = delim || ',';
+  function endField() { row.push(f); f = ''; quotedField = false; }
+  function endRow() { endField(); rows.push(row); row = []; }
+  while (i < n) {
+    var c = s[i];
+    if (q) {
+      if (c === '"') { if (s[i + 1] === '"') { f += '"'; i += 2; continue; } q = false; i++; continue; }
+      f += c; i++; continue;
+    }
+    if (c === '"' && f === '' && !quotedField) { q = true; quotedField = true; i++; continue; }
+    if (c === '"' && quotedField) { f += c; i++; if (warn.length < 5) warn.push('Stray quote after a closing quote on row ' + (rows.length + 1)); continue; }
+    if (c === delim) { endField(); i++; continue; }
+    if (c === '\r' || c === '\n') { endRow(); i += c === '\r' && s[i + 1] === '\n' ? 2 : 1; if (limit && rows.length >= limit) return { rows: rows, warnings: warn, truncated: true }; continue; }
+    f += c; i++;
+  }
+  if (q) warn.push('Unclosed quote: a field starting with " never ends (row ' + (rows.length + 1) + ')');
+  if (f !== '' || row.length || quotedField) endRow();
+  return { rows: rows, warnings: warn };
+};
+
+T.csvDetectDelimiter = function (text) {
+  var sample = String(text).slice(0, 20000), best = ',', bestScore = -1;
+  [',', ';', '\t', '|'].forEach(function (d) {
+    var rows = T.csvParse(sample, d, 30).rows.filter(function (r) { return !(r.length === 1 && r[0] === ''); });
+    if (rows.length > 1 && sample.length >= 20000) rows.pop(); // last row may be cut off
+    if (!rows.length) return;
+    var counts = rows.map(function (r) { return r.length; }), first = counts[0];
+    if (first < 2) return;
+    var same = counts.filter(function (c) { return c === first; }).length / counts.length;
+    var score = same * 100 + Math.min(first, 50);
+    if (score > bestScore) { bestScore = score; best = d; }
+  });
+  return best;
+};
+
+function csvInfer(v) {
+  if (v === '') return null;
+  if (/^-?(0|[1-9]\d{0,14})(\.\d+)?([eE][+-]?\d+)?$/.test(v)) { var x = Number(v); if (isFinite(x)) return x; }
+  if (v === 'true' || v === 'TRUE' || v === 'True') return true;
+  if (v === 'false' || v === 'FALSE' || v === 'False') return false;
+  if (v === 'null' || v === 'NULL') return null;
+  return v;
+}
+
+T.csvToJson = function (text, opts) {
+  opts = opts || {};
+  var d = !opts.delimiter || opts.delimiter === 'auto' ? T.csvDetectDelimiter(text) : opts.delimiter;
+  var p = T.csvParse(text, d), rows = p.rows;
+  if (opts.skipEmpty !== false) rows = rows.filter(function (r) { return !(r.length === 1 && r[0] === ''); });
+  var conv = opts.infer ? csvInfer : function (v) { return v; };
+  var warnings = p.warnings.slice(), data;
+  if (opts.header !== false && rows.length) {
+    var used = {}, keys = rows[0].map(function (h, k) {
+      var key = h.trim() || 'column_' + (k + 1), base = key, m = 2;
+      while (used[key]) key = base + '_' + m++;
+      if (key !== base) warnings.push('Duplicate column name "' + base + '" renamed to "' + key + '"');
+      used[key] = 1; return key;
+    });
+    var ragged = 0;
+    data = rows.slice(1).map(function (r) {
+      var o = {};
+      if (r.length !== keys.length) ragged++;
+      for (var k = 0; k < Math.max(keys.length, r.length); k++) {
+        var key = k < keys.length ? keys[k] : 'column_' + (k + 1);
+        o[key] = k < r.length ? conv(r[k]) : (opts.infer ? null : '');
+      }
+      return o;
+    });
+    if (ragged) warnings.push(ragged + ' row' + (ragged > 1 ? 's have' : ' has') + ' a different number of fields than the header (' + keys.length + ')');
+  } else data = rows.map(function (r) { return r.map(conv); });
+  return { data: data, delimiter: d, rows: rows.length, warnings: warnings };
+};
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+function csvQuote(s, d, always) {
+  return always || s.indexOf(d) >= 0 || /["\r\n]/.test(s) || /^\s|\s$/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+T.jsonToCsv = function (value, opts) {
+  opts = opts || {};
+  var d = opts.delimiter && opts.delimiter !== 'auto' ? opts.delimiter : ',', eol = opts.crlf ? '\r\n' : '\n', lines = [];
+  if (typeof value === 'string') value = JSON.parse(value);
+  if (value && !Array.isArray(value) && typeof value === 'object') {
+    var ks0 = Object.keys(value);
+    // {"items": [...]} wrapper: use the first array property
+    var arrKey = ks0.filter(function (k) { return Array.isArray(value[k]) && value[k].length && typeof value[k][0] === 'object'; })[0];
+    value = arrKey && ks0.length <= 3 ? value[arrKey] : [value];
+  }
+  if (!Array.isArray(value)) throw new Error('Expected a JSON array (of objects or of arrays).');
+  var flat = opts.flatten !== false;
+  function flatten(o, pre, out) {
+    Object.keys(o).forEach(function (k) {
+      var v = o[k], key = pre ? pre + '.' + k : k;
+      if (flat && v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length) flatten(v, key, out); else out[key] = v;
+    });
+    return out;
+  }
+  if (value.every(function (r) { return Array.isArray(r); })) {
+    value.forEach(function (r) { lines.push(r.map(function (c) { return csvQuote(csvCell(c), d, opts.quoteAll); }).join(d)); });
+    return lines.join(eol) + (lines.length ? eol : '');
+  }
+  var rows = value.map(function (r) { return r && typeof r === 'object' && !Array.isArray(r) ? flatten(r, '', {}) : { value: r }; });
+  var keys = [], seen = {};
+  rows.forEach(function (r) { Object.keys(r).forEach(function (k) { if (!seen[k]) { seen[k] = 1; keys.push(k); } }); });
+  if (opts.header !== false) lines.push(keys.map(function (k) { return csvQuote(k, d, opts.quoteAll); }).join(d));
+  rows.forEach(function (r) { lines.push(keys.map(function (k) { return csvQuote(csvCell(r[k]), d, opts.quoteAll); }).join(d)); });
+  return lines.join(eol) + eol;
+};
+/* ---------------- Subnet / CIDR calculator ---------------- */
+T.ip4Parse = function (s) {
+  s = String(s).trim();
+  var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) throw new Error('"' + s + '" is not a valid IPv4 address (expected four numbers like 192.168.1.10).');
+  var n = 0;
+  for (var k = 1; k <= 4; k++) {
+    if (m[k].length > 1 && m[k][0] === '0') throw new Error('"' + s + '": leading zeros are ambiguous (some tools read them as octal). Write ' + m.slice(1).map(function (x) { return +x; }).join('.') + '.');
+    var v = +m[k]; if (v > 255) throw new Error('"' + s + '": each part must be 0-255, got ' + v + '.');
+    n = n * 256 + v;
+  }
+  return n;
+};
+T.ip4Str = function (n) { return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'); };
+function ip4Mask(p) { return p === 0 ? 0 : (0xffffffff << (32 - p)) >>> 0; }
+function ip4Bin(n) { var b = ('0'.repeat(32) + n.toString(2)).slice(-32); return b.slice(0, 8) + '.' + b.slice(8, 16) + '.' + b.slice(16, 24) + '.' + b.slice(24); }
+T.ip4MaskToPrefix = function (s) {
+  var n = T.ip4Parse(s), p = 0;
+  while (p < 32 && (n & (0x80000000 >>> p))) p++;
+  if (ip4Mask(p) !== n) {
+    var inv = (~n) >>> 0, q = 0; while (q < 32 && (inv & (0x80000000 >>> q))) q++;
+    if (ip4Mask(q) === inv) return { prefix: q, wildcard: true };
+    throw new Error(s + ' is not a valid netmask (the 1 bits must be contiguous, e.g. 255.255.255.0).');
+  }
+  return { prefix: p };
+};
+function ip4Type(n) {
+  var R = [['0.0.0.0', 8, 'This network (0.0.0.0/8)'], ['10.0.0.0', 8, 'Private (RFC 1918)'], ['100.64.0.0', 10, 'Carrier-grade NAT / shared (RFC 6598)'], ['127.0.0.0', 8, 'Loopback'],
+    ['169.254.0.0', 16, 'Link-local (APIPA)'], ['172.16.0.0', 12, 'Private (RFC 1918)'], ['192.0.0.0', 24, 'IETF protocol assignments'], ['192.0.2.0', 24, 'Documentation (TEST-NET-1)'],
+    ['192.88.99.0', 24, 'Reserved (6to4 relay)'], ['192.168.0.0', 16, 'Private (RFC 1918)'], ['198.18.0.0', 15, 'Benchmarking (RFC 2544)'], ['198.51.100.0', 24, 'Documentation (TEST-NET-2)'],
+    ['203.0.113.0', 24, 'Documentation (TEST-NET-3)'], ['224.0.0.0', 4, 'Multicast'], ['255.255.255.255', 32, 'Limited broadcast'], ['240.0.0.0', 4, 'Reserved (class E)']];
+  for (var k = 0; k < R.length; k++) { var b = T.ip4Parse(R[k][0]), m = ip4Mask(R[k][1]); if (((n & m) >>> 0) === b) return R[k][2]; }
+  return 'Public (globally routable)';
+}
+// Accepts "10.0.0.5/24", "10.0.0.5 255.255.255.0", "10.0.0.5/255.255.255.0" or a bare address (/32).
+T.cidrParse = function (s) {
+  s = String(s).trim();
+  var m = /^([\d.]+)\s*(?:\/\s*(\d{1,2})|[\/\s]\s*([\d.]+))?$/.exec(s);
+  if (!m) throw new Error('Enter an IPv4 network like 192.168.1.0/24 or 10.0.0.5 255.255.255.0.');
+  var ip = T.ip4Parse(m[1]), p = 32;
+  if (m[2] !== undefined) { p = +m[2]; if (p > 32) throw new Error('The prefix length must be between 0 and 32.'); }
+  else if (m[3] !== undefined) p = T.ip4MaskToPrefix(m[3]).prefix;
+  return { ip: ip, prefix: p };
+};
+T.cidrInfo = function (s) {
+  var c = typeof s === 'string' ? T.cidrParse(s) : s, p = c.prefix, mask = ip4Mask(p), net = (c.ip & mask) >>> 0, bc = (net | (~mask >>> 0)) >>> 0;
+  var total = Math.pow(2, 32 - p), first, last, usable;
+  if (p === 32) { first = last = net; usable = 1; }
+  else if (p === 31) { first = net; last = bc; usable = 2; }
+  else { first = net + 1; last = bc - 1; usable = total - 2; }
+  var o1 = net >>> 24;
+  return {
+    input: T.ip4Str(c.ip) + '/' + p, prefix: p, address: T.ip4Str(c.ip), network: T.ip4Str(net), broadcast: p >= 31 ? null : T.ip4Str(bc), netmask: T.ip4Str(mask),
+    wildcard: T.ip4Str(~mask >>> 0), first: T.ip4Str(first), last: T.ip4Str(last), total: total, usable: usable, cidr: T.ip4Str(net) + '/' + p,
+    hostBitsSet: c.ip !== net, type: ip4Type(c.ip), cls: o1 < 128 ? 'A' : o1 < 192 ? 'B' : o1 < 224 ? 'C' : o1 < 240 ? 'D (multicast)' : 'E (reserved)',
+    binMask: ip4Bin(mask), binAddr: ip4Bin(c.ip), hex: '0x' + ('00000000' + c.ip.toString(16)).slice(-8), int: c.ip, netInt: net, bcInt: bc,
+    ptr: p % 8 === 0 && p > 0 ? T.ip4Str(net).split('.').slice(0, p / 8).reverse().join('.') + '.in-addr.arpa' : null
+  };
+};
+T.cidrContains = function (cidr, ip) {
+  var c = T.cidrInfo(cidr), n = typeof ip === 'number' ? ip : T.ip4Parse(ip);
+  return n >= c.netInt && n <= c.bcInt;
+};
+T.cidrSplit = function (cidr, newPrefix, max) {
+  var c = T.cidrInfo(cidr), np = +newPrefix;
+  if (!(np >= c.prefix && np <= 32)) throw new Error('The new prefix must be between /' + c.prefix + ' and /32.');
+  var count = Math.pow(2, np - c.prefix), size = Math.pow(2, 32 - np), out = [];
+  for (var k = 0; k < count && k < (max || 256); k++) out.push(T.cidrInfo({ ip: c.netInt + k * size, prefix: np }));
+  return { count: count, size: size, subnets: out };
+};
+// Do two networks overlap? Useful for VPN / Docker / Kubernetes address conflicts.
+T.cidrOverlap = function (a, b) { var x = T.cidrInfo(a), y = T.cidrInfo(b); return x.netInt <= y.bcInt && y.netInt <= x.bcInt; };
+
+/* IPv6 */
+T.ip6Parse = function (s) {
+  s = String(s).trim().replace(/^\[|\]$/g, '');
+  var zone = '', zi = s.indexOf('%'); if (zi >= 0) { zone = s.slice(zi); s = s.slice(0, zi); }
+  if (!/^[0-9a-fA-F:.]+$/.test(s) || s.indexOf(':') < 0) throw new Error('"' + s + '" is not a valid IPv6 address.');
+  var v4 = null, m = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (m) { v4 = T.ip4Parse(m[2]); s = m[1] + (v4 >>> 16).toString(16) + ':' + (v4 & 0xffff).toString(16); }
+  var dbl = s.split('::');
+  if (dbl.length > 2) throw new Error('"::" may appear only once in an IPv6 address.');
+  function groups(x) { return x === '' ? [] : x.split(':'); }
+  var head = groups(dbl[0]), tail = dbl.length === 2 ? groups(dbl[1]) : [];
+  var all = head.concat(tail);
+  if (all.some(function (g) { return !/^[0-9a-fA-F]{1,4}$/.test(g); })) throw new Error('Each IPv6 group must be 1-4 hex digits.');
+  var missing = 8 - all.length;
+  if (dbl.length === 2 ? missing < 1 : missing !== 0) throw new Error(dbl.length === 2 ? 'Too many groups for "::" to stand for.' : 'An IPv6 address needs 8 groups (or "::" for a run of zeros).');
+  var full = head.concat(new Array(dbl.length === 2 ? missing : 0).fill('0'), tail), n = BigInt(0);
+  full.forEach(function (g) { n = (n << BigInt(16)) | BigInt(parseInt(g, 16)); });
+  return { n: n, zone: zone };
+};
+function ip6Groups(n) { var g = []; for (var k = 7; k >= 0; k--) g.push(Number((n >> BigInt(16 * k)) & BigInt(0xffff))); return g; }
+T.ip6Expand = function (n) { return ip6Groups(n).map(function (g) { return ('000' + g.toString(16)).slice(-4); }).join(':'); };
+T.ip6Compress = function (n) {
+  var g = ip6Groups(n), bs = -1, bl = 0;
+  for (var k = 0; k < 8;) { if (g[k] === 0) { var j = k; while (j < 8 && g[j] === 0) j++; if (j - k > bl) { bs = k; bl = j - k; } k = j; } else k++; }
+  var h = g.map(function (x) { return x.toString(16); });
+  if (bl < 2) return h.join(':');
+  return h.slice(0, bs).join(':') + '::' + h.slice(bs + bl).join(':');
+};
+function ip6Type(n) {
+  var R = [['::1', 128, 'Loopback'], ['::', 128, 'Unspecified'], ['::ffff:0:0', 96, 'IPv4-mapped'], ['64:ff9b::', 96, 'IPv4/IPv6 translation (NAT64)'], ['2001:db8::', 32, 'Documentation'],
+    ['2001::', 32, 'Teredo'], ['2002::', 16, '6to4'], ['fe80::', 10, 'Link-local'], ['fc00::', 7, 'Unique local (ULA, private)'], ['ff00::', 8, 'Multicast'], ['2000::', 3, 'Global unicast']];
+  for (var k = 0; k < R.length; k++) { var b = T.ip6Parse(R[k][0]).n, sh = BigInt(128 - R[k][1]); if ((n >> sh) === (b >> sh)) return R[k][2]; }
+  return 'Reserved';
+}
+T.ip6Info = function (s) {
+  s = String(s).trim();
+  var m = /^(.*?)(?:\/(\d{1,3}))?$/.exec(s), a = T.ip6Parse(m[1]), p = m[2] === undefined ? 128 : +m[2];
+  if (p > 128) throw new Error('The IPv6 prefix length must be between 0 and 128.');
+  var ALL = (BigInt(1) << BigInt(128)) - BigInt(1), host = p === 128 ? BigInt(0) : (BigInt(1) << BigInt(128 - p)) - BigInt(1), net = a.n & (ALL ^ host), last = net | host;
+  var total = BigInt(1) << BigInt(128 - p);
+  return { address: T.ip6Compress(a.n) + a.zone, expanded: T.ip6Expand(a.n), prefix: p, network: T.ip6Compress(net) + '/' + p, first: T.ip6Compress(net), last: T.ip6Compress(last),
+    firstExpanded: T.ip6Expand(net), lastExpanded: T.ip6Expand(last), total: total.toString(), totalPow: '2^' + (128 - p), type: ip6Type(a.n), n: a.n,
+    hostBitsSet: (a.n & host) !== BigInt(0),
+    ptr: T.ip6Expand(a.n).replace(/:/g, '').split('').reverse().join('.') + '.ip6.arpa' };
+};
+/* ---------------- docker run -> compose ---------------- */
+// value-taking flags: flag -> compose handler name
+var DR_VAL = { '-p': 'ports', '--publish': 'ports', '-v': 'volumes', '--volume': 'volumes', '--mount': 'mount', '-e': 'env', '--env': 'env', '--env-file': 'env_file',
+  '--name': 'name', '--restart': 'restart', '--network': 'network', '--net': 'network', '--network-alias': 'alias', '--net-alias': 'alias', '-w': 'working_dir',
+  '--workdir': 'working_dir', '-u': 'user', '--user': 'user', '--entrypoint': 'entrypoint', '-h': 'hostname', '--hostname': 'hostname', '--add-host': 'extra_hosts',
+  '--dns': 'dns', '--dns-search': 'dns_search', '-l': 'labels', '--label': 'labels', '--cpus': 'cpus', '-m': 'mem_limit', '--memory': 'mem_limit',
+  '--memory-reservation': 'mem_reservation', '--memory-swap': 'memswap_limit', '--shm-size': 'shm_size', '--cap-add': 'cap_add', '--cap-drop': 'cap_drop',
+  '--device': 'devices', '--log-driver': 'log_driver', '--log-opt': 'log_opt', '--ulimit': 'ulimits', '--sysctl': 'sysctls', '--tmpfs': 'tmpfs', '--platform': 'platform',
+  '--pull': 'pull_policy', '--health-cmd': 'hc_test', '--health-interval': 'hc_interval', '--health-retries': 'hc_retries', '--health-timeout': 'hc_timeout',
+  '--health-start-period': 'hc_start_period', '--gpus': 'gpus', '--ipc': 'ipc', '--pid': 'pid', '--stop-signal': 'stop_signal', '--stop-timeout': 'stop_grace_period',
+  '--security-opt': 'security_opt', '--expose': 'expose', '--link': 'links', '--group-add': 'group_add', '--runtime': 'runtime', '--mac-address': 'mac_address',
+  '--ip': 'ip', '--ip6': 'ip6', '--userns': 'userns_mode', '--uts': 'uts', '--cgroup-parent': 'cgroup_parent', '--cpu-shares': 'cpu_shares', '-c': 'cpu_shares',
+  '--cpuset-cpus': 'cpuset', '--pids-limit': 'pids_limit', '--oom-score-adj': 'oom_score_adj', '--volumes-from': 'volumes_from', '--label-file': 'label_file',
+  '--attach': 'ignore', '-a': 'ignore', '--cidfile': 'ignore', '--detach-keys': 'ignore', '--storage-opt': 'storage_opt', '--device-cgroup-rule': 'device_cgroup_rules',
+  '--isolation': 'isolation', '--domainname': 'domainname', '--cgroupns': 'cgroup', '--blkio-weight': 'blkio', '--cpu-period': 'cpu_period', '--cpu-quota': 'cpu_quota' };
+var DR_BOOL = { '-d': 'detach', '--detach': 'detach', '-i': 'stdin_open', '--interactive': 'stdin_open', '-t': 'tty', '--tty': 'tty', '--rm': 'rm', '--privileged': 'privileged',
+  '--init': 'init', '--read-only': 'read_only', '-P': 'publish_all', '--publish-all': 'publish_all', '--no-healthcheck': 'no_healthcheck', '-q': 'ignore', '--quiet': 'ignore',
+  '--sig-proxy': 'ignore', '--oom-kill-disable': 'oom_kill_disable' };
+
+function yq(s) {
+  s = String(s);
+  if (s === '') return '""';
+  if (/^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s) || /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) || /^0[xo][0-9a-f]+$/i.test(s) || /^[\d:]+$/.test(s)) return JSON.stringify(s);
+  if (/^[A-Za-z0-9_.\/~$][A-Za-z0-9_.\/~$@%+=:-]*$/.test(s) && !/:$/.test(s)) return s;
+  return JSON.stringify(s);
+}
+T.yamlQuote = yq;
+function yflow(arr) { return '[' + arr.map(function (x) { return JSON.stringify(x); }).join(', ') + ']'; }
+function drServiceName(name, image) {
+  var s = name || (image || 'app').replace(/@.*$/, '').split('/').pop().replace(/:.*$/, '');
+  s = s.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^[^a-z0-9]+|[-.]+$/g, '');
+  return s || 'app';
+}
+function drDur(v) { return /^\d+$/.test(v) ? v + 's' : v; }
+
+T.dockerRunParse = function (text) {
+  var words = T.shellSplit(String(text).trim().replace(/^\$\s+/, '')), cmds = [], cur = null, warnings = [];
+  for (var k = 0; k < words.length; k++) {
+    var w = words[k];
+    if (typeof w !== 'string') { if (cur) { cmds.push(cur); cur = null; } continue; }
+    if (cur) { cur.push(w); continue; }
+    if (/(^|\/)(docker|podman)(\.exe)?$/.test(w) || w === 'sudo') {
+      var j = k + (w === 'sudo' ? 1 : 0);
+      if (w === 'sudo' && !/docker|podman/.test(words[j] || '')) continue;
+      var a1 = words[j + 1], a2 = words[j + 2];
+      if (a1 === 'run') { cur = []; k = j + 1; } else if (a1 === 'container' && (a2 === 'run' || a2 === 'create')) { cur = []; k = j + 2; } else if (a1 === 'create') { cur = []; k = j + 1; }
+    }
+  }
+  if (cur) cmds.push(cur);
+  if (!cmds.length) throw new Error('No "docker run" command found. Paste a command like: docker run -d -p 8080:80 nginx');
+  var services = cmds.map(function (args) { return drParseOne(args, warnings); });
+  return { services: services, warnings: warnings };
+};
+
+function drParseOne(args, warnings) {
+  var s = { opts: {}, lists: {}, image: null, command: [] };
+  function addList(key, v) { (s.lists[key] = s.lists[key] || []).push(v); }
+  for (var i = 0; i < args.length; i++) {
+    var a = args[i], flag = null, val = null;
+    if (a === '--') { i++; a = args[i]; if (a === undefined) break; }
+    else if (/^--[a-z]/.test(a)) {
+      var eq = a.indexOf('=');
+      flag = eq > 0 ? a.slice(0, eq) : a;
+      if (DR_VAL[flag]) { val = eq > 0 ? a.slice(eq + 1) : args[++i]; if (val === undefined) throw new Error(flag + ' needs a value.'); }
+      else if (DR_BOOL[flag]) { val = eq > 0 ? a.slice(eq + 1) : 'true'; if (/^false$/i.test(val)) continue; }
+      else { warnings.push('Unknown option ' + flag + ' was skipped.'); if (eq < 0 && args[i + 1] && args[i + 1].charAt(0) !== '-' && false) i++; continue; }
+      drApply(s, flag, val, warnings, addList); continue;
+    } else if (/^-[A-Za-z]/.test(a)) {
+      for (var j = 1; j < a.length; j++) {
+        var f = '-' + a[j];
+        if (DR_VAL[f]) { val = a.slice(j + 1).replace(/^=/, '') || args[++i]; if (val === undefined) throw new Error(f + ' needs a value.'); drApply(s, f, val, warnings, addList); break; }
+        if (DR_BOOL[f]) { drApply(s, f, 'true', warnings, addList); continue; }
+        warnings.push('Unknown option ' + f + ' was skipped.');
+      }
+      continue;
+    }
+    s.image = a; s.command = args.slice(i + 1); break;
+  }
+  if (!s.image) throw new Error('No image name found after the options.');
+  return s;
+}
+
+function drApply(s, flag, v, warnings, addList) {
+  var h = DR_VAL[flag] || DR_BOOL[flag], o = s.opts;
+  switch (h) {
+    case 'ports': case 'volumes': case 'env': case 'env_file': case 'extra_hosts': case 'dns': case 'dns_search': case 'labels': case 'cap_add': case 'cap_drop': case 'devices':
+    case 'log_opt': case 'ulimits': case 'sysctls': case 'tmpfs': case 'security_opt': case 'expose': case 'links': case 'group_add': case 'alias': case 'mount':
+    case 'volumes_from': case 'storage_opt': case 'device_cgroup_rules': case 'label_file': case 'network':
+      addList(h, v); break;
+    case 'ignore': break;
+    default: o[h] = v;
+  }
+}
+
+T.dockerRunToCompose = function (text) {
+  var p = T.dockerRunParse(text), W = p.warnings.slice(), L = ['services:'], topNet = {}, topVol = {}, names = {};
+  var dollar = false;
+  function esc$(x) { if (/\$/.test(x)) { dollar = true; } return x; }
+  p.services.forEach(function (s) {
+    var o = s.opts, li = s.lists, name = drServiceName(o.name, s.image), base = name, n = 2;
+    while (names[name]) name = base + '-' + n++;
+    names[name] = 1;
+    var S = [];
+    function kv(k, v) { S.push('    ' + k + ': ' + v); }
+    function list(k, arr, q) { if (!arr || !arr.length) return; S.push('    ' + k + ':'); arr.forEach(function (x) { S.push('      - ' + (q ? JSON.stringify(x) : yq(x))); }); }
+    kv('image', yq(s.image));
+    if (o.name) kv('container_name', yq(o.name));
+    if (o.platform) kv('platform', yq(o.platform));
+    if (o.pull_policy) kv('pull_policy', yq(o.pull_policy === 'missing' ? 'missing' : o.pull_policy));
+    if (o.restart) kv('restart', yq(o.restart));
+    if (o.entrypoint !== undefined) kv('entrypoint', o.entrypoint === '' ? '[""]' : yflow([o.entrypoint]));
+    if (s.command.length) kv('command', yflow(s.command.map(function (c) { return /\$/.test(c) ? (dollar = true, c.replace(/\$/g, '$$$$')) : c; })));
+    if (o.working_dir) kv('working_dir', yq(o.working_dir));
+    if (o.user) kv('user', JSON.stringify(o.user));
+    if (o.hostname) kv('hostname', yq(o.hostname));
+    if (o.domainname) kv('domainname', yq(o.domainname));
+    if (li.ports) list('ports', li.ports, true);
+    if (li.expose) list('expose', li.expose, true);
+    // volumes (short syntax) and --mount (long syntax)
+    var vols = (li.volumes || []).map(function (v) {
+      var parts = v.split(':'), src = parts[0];
+      if (/^[A-Za-z]$/.test(src) && parts.length > 2) { src = parts[0] + ':' + parts[1]; parts = [src].concat(parts.slice(2)); } // Windows C:\path
+      if (parts.length === 1) return { s: v, note: 'anonymous' };
+      var src2 = src.replace(/^(\$\(pwd\)|\$\{?PWD\}?|`pwd`|%cd%|\$\{pwd\})(?=\/|\\|$)/, '.');
+      if (src2 !== src) { if (src2 === '.') src2 = '.'; parts[0] = src2; }
+      if (!/^[.\/~$\\]|^[A-Za-z]:/.test(parts[0])) topVol[parts[0]] = 1;
+      return { s: parts.join(':') };
+    });
+    var mounts = (li.mount || []).map(function (m) {
+      var kvs = {}; m.split(',').forEach(function (x) { var e = x.indexOf('='); kvs[e < 0 ? x : x.slice(0, e)] = e < 0 ? 'true' : x.slice(e + 1); });
+      return kvs;
+    });
+    if (vols.length || mounts.length) {
+      S.push('    volumes:');
+      vols.forEach(function (v) { S.push('      - ' + yq(v.s)); });
+      mounts.forEach(function (m) {
+        var type = m.type || 'volume', src = m.source || m.src, dst = m.target || m.destination || m.dst;
+        if (src && type === 'bind') src = src.replace(/^(\$\(pwd\)|\$\{?PWD\}?|`pwd`)(?=\/|$)/, '.');
+        S.push('      - type: ' + type);
+        if (src) S.push('        source: ' + yq(src));
+        if (dst) S.push('        target: ' + yq(dst));
+        if (m.readonly || m.ro) S.push('        read_only: true');
+        if (type === 'volume' && src) topVol[src] = 1;
+        if (m['bind-propagation']) S.push('        bind:', '          propagation: ' + yq(m['bind-propagation']));
+        if (m['volume-nocopy']) S.push('        volume:', '          nocopy: true');
+        if (m['tmpfs-size']) S.push('        tmpfs:', '          size: ' + yq(m['tmpfs-size']));
+      });
+    }
+    if (li.volumes_from) list('volumes_from', li.volumes_from);
+    if (li.tmpfs) list('tmpfs', li.tmpfs);
+    if (li.env) {
+      S.push('    environment:');
+      li.env.forEach(function (e) {
+        var eqi = e.indexOf('=');
+        if (eqi < 0) { S.push('      - ' + yq(e)); return; }
+        var val = e.slice(eqi + 1);
+        if (/\$/.test(val)) { dollar = true; val = val.replace(/\$/g, '$$$$'); }
+        S.push('      ' + yq(e.slice(0, eqi)) + ': ' + yq(val));
+      });
+      // the "- KEY" form and "KEY: value" form can't be mixed in one block
+      var block = S.slice(S.lastIndexOf('    environment:') + 1);
+      if (block.some(function (l) { return /^      - /.test(l); }) && block.some(function (l) { return !/^      - /.test(l); })) {
+        var start = S.lastIndexOf('    environment:') + 1;
+        S.splice(start, block.length);
+        li.env.forEach(function (e) { var eqi = e.indexOf('='); var x = eqi < 0 ? e : e.slice(0, eqi + 1) + e.slice(eqi + 1).replace(/\$/g, '$$$$'); S.push('      - ' + yq(x)); });
+      }
+    }
+    if (li.env_file) list('env_file', li.env_file);
+    // networking
+    var nets = li.network || [];
+    var mode = nets.filter(function (x) { return /^(host|none|bridge|default)$|^(container|service|ns):/.test(x); })[0];
+    var custom = nets.filter(function (x) { return x !== mode; }).map(function (x) { return x.split(',')[0].replace(/^name=/, ''); });
+    if (mode && mode !== 'bridge' && mode !== 'default') kv('network_mode', JSON.stringify(mode.replace(/^container:/, 'container:')));
+    if (mode === 'bridge') W.push('--network bridge is Docker\'s default network: Compose instead puts services on a project network named <project>_default, where they can reach each other by service name.');
+    if (custom.length) {
+      if (li.alias || o.ip || o.ip6) {
+        S.push('    networks:');
+        custom.forEach(function (nn, idx) {
+          S.push('      ' + yq(nn) + ':');
+          if (idx === 0 && li.alias) { S.push('        aliases:'); li.alias.forEach(function (a) { S.push('          - ' + yq(a)); }); }
+          if (idx === 0 && o.ip) S.push('        ipv4_address: ' + yq(o.ip));
+          if (idx === 0 && o.ip6) S.push('        ipv6_address: ' + yq(o.ip6));
+        });
+      } else list('networks', custom);
+      custom.forEach(function (nn) { topNet[nn] = 1; });
+    } else if (li.alias || o.ip) W.push('--network-alias / --ip only work on a user-defined network: add one under "networks:".');
+    if (li.links) { list('links', li.links); W.push('--link is legacy: on a Compose network every service can already reach the others by service name.'); }
+    if (li.extra_hosts) list('extra_hosts', li.extra_hosts.map(function (x) { return x.replace(/^([^:]+):/, '$1:'); }), true);
+    if (li.dns) list('dns', li.dns);
+    if (li.dns_search) list('dns_search', li.dns_search);
+    if (o.mac_address) kv('mac_address', JSON.stringify(o.mac_address));
+    if (o.stdin_open) kv('stdin_open', 'true');
+    if (o.tty) kv('tty', 'true');
+    if (o.privileged) kv('privileged', 'true');
+    if (o.init) kv('init', 'true');
+    if (o.read_only) kv('read_only', 'true');
+    if (o.ipc) kv('ipc', yq(o.ipc));
+    if (o.pid) kv('pid', yq(o.pid));
+    if (o.uts) kv('uts', yq(o.uts));
+    if (o.userns_mode) kv('userns_mode', yq(o.userns_mode));
+    if (o.cgroup) kv('cgroup', yq(o.cgroup));
+    if (o.cgroup_parent) kv('cgroup_parent', yq(o.cgroup_parent));
+    if (o.isolation) kv('isolation', yq(o.isolation));
+    if (o.runtime) kv('runtime', yq(o.runtime));
+    if (li.cap_add) list('cap_add', li.cap_add);
+    if (li.cap_drop) list('cap_drop', li.cap_drop);
+    if (li.security_opt) list('security_opt', li.security_opt);
+    if (li.devices) list('devices', li.devices);
+    if (li.device_cgroup_rules) list('device_cgroup_rules', li.device_cgroup_rules, true);
+    if (li.group_add) list('group_add', li.group_add, true);
+    if (o.cpus) kv('cpus', JSON.stringify(o.cpus).replace(/"/g, '') === o.cpus && /^\d+(\.\d+)?$/.test(o.cpus) ? o.cpus : yq(o.cpus));
+    if (o.cpu_shares) kv('cpu_shares', /^\d+$/.test(o.cpu_shares) ? o.cpu_shares : yq(o.cpu_shares));
+    if (o.cpu_period) kv('cpu_period', yq(o.cpu_period));
+    if (o.cpu_quota) kv('cpu_quota', yq(o.cpu_quota));
+    if (o.cpuset) kv('cpuset', JSON.stringify(o.cpuset));
+    if (o.mem_limit) kv('mem_limit', yq(o.mem_limit));
+    if (o.mem_reservation) kv('mem_reservation', yq(o.mem_reservation));
+    if (o.memswap_limit) kv('memswap_limit', yq(o.memswap_limit));
+    if (o.shm_size) kv('shm_size', yq(o.shm_size));
+    if (o.pids_limit) kv('pids_limit', /^-?\d+$/.test(o.pids_limit) ? o.pids_limit : yq(o.pids_limit));
+    if (o.oom_score_adj) kv('oom_score_adj', o.oom_score_adj);
+    if (o.oom_kill_disable) kv('oom_kill_disable', 'true');
+    if (o.blkio) S.push('    blkio_config:', '      weight: ' + o.blkio);
+    if (li.ulimits) {
+      S.push('    ulimits:');
+      li.ulimits.forEach(function (u) {
+        var m = /^([a-z]+)=(-?\d+)(?::(-?\d+))?$/.exec(u);
+        if (!m) { W.push('Could not convert --ulimit ' + u); return; }
+        if (m[3] === undefined) S.push('      ' + m[1] + ': ' + m[2]);
+        else S.push('      ' + m[1] + ':', '        soft: ' + m[2], '        hard: ' + m[3]);
+      });
+    }
+    if (li.sysctls) { S.push('    sysctls:'); li.sysctls.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    if (li.storage_opt) { S.push('    storage_opt:'); li.storage_opt.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    if (li.labels) {
+      S.push('    labels:');
+      li.labels.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(e < 0 ? x : x.slice(0, e)) + ': ' + yq(e < 0 ? '' : x.slice(e + 1).replace(/\$/g, function () { dollar = true; return '$$'; }))); });
+    }
+    if (li.label_file) W.push('--label-file is not supported by Compose: copy the labels into "labels:".');
+    if (o.log_driver || li.log_opt) {
+      S.push('    logging:');
+      if (o.log_driver) S.push('      driver: ' + yq(o.log_driver));
+      if (li.log_opt) { S.push('      options:'); li.log_opt.forEach(function (x) { var e = x.indexOf('='); S.push('        ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    }
+    if (o.no_healthcheck) S.push('    healthcheck:', '      disable: true');
+    else if (o.hc_test || o.hc_interval || o.hc_retries || o.hc_timeout || o.hc_start_period) {
+      S.push('    healthcheck:');
+      if (o.hc_test) S.push('      test: ' + yflow(['CMD-SHELL', o.hc_test.replace(/\$/g, function () { dollar = true; return '$$'; })]));
+      if (o.hc_interval) S.push('      interval: ' + yq(drDur(o.hc_interval)));
+      if (o.hc_timeout) S.push('      timeout: ' + yq(drDur(o.hc_timeout)));
+      if (o.hc_retries) S.push('      retries: ' + o.hc_retries);
+      if (o.hc_start_period) S.push('      start_period: ' + yq(drDur(o.hc_start_period)));
+    }
+    if (o.stop_signal) kv('stop_signal', yq(o.stop_signal));
+    if (o.stop_grace_period) kv('stop_grace_period', yq(drDur(o.stop_grace_period)));
+    if (o.gpus) {
+      var g = o.gpus.replace(/^"|"$/g, ''), cm = /^(all|\d+)$/.exec(g), dm = /device=([\d,]+)/.exec(g);
+      S.push('    deploy:', '      resources:', '        reservations:', '          devices:', '            - driver: nvidia');
+      if (dm) S.push('              device_ids: ' + yflow(dm[1].split(',')));
+      else S.push('              count: ' + (cm ? cm[1] : 'all'));
+      S.push('              capabilities: [gpu]');
+    }
+    if (o.rm) W.push('--rm has no Compose equivalent for services: "docker compose down" removes the containers. For one-off tasks use "docker compose run --rm ' + name + '".');
+    if (o.detach) W.push('-d is not part of the file: start the stack in the background with "docker compose up -d".');
+    if (o.publish_all) W.push('-P (publish all exposed ports to random host ports) has no direct Compose equivalent: list the ports under "ports:" (e.g. "- \\"80\\"" picks a random host port).');
+    if (li.ports && li.ports.some(function (x) { return /^\d+:\d+$/.test(x) && +x.split(':')[1] < 60; })) W.push('Ports are written in quotes on purpose: unquoted values like 22:22 are read by YAML 1.1 parsers as base-60 numbers (22:22 becomes 1342).');
+    L.push('  ' + name + ':');
+    L.push.apply(L, S);
+  });
+  if (dollar) W.push('Every "$" in a value was doubled to "$$": Compose would otherwise treat it as a ${VARIABLE} to substitute from your shell or .env file.');
+  var nk = Object.keys(topNet);
+  if (nk.length) { L.push('', 'networks:'); nk.forEach(function (x) { L.push('  ' + yq(x) + ':', '    external: true'); }); W.push('The network' + (nk.length > 1 ? 's ' : ' ') + nk.join(', ') + ' marked "external: true" must already exist (docker network create ' + nk[0] + '). Remove "external: true" to let Compose create and manage it.'); }
+  var vk = Object.keys(topVol);
+  if (vk.length) { L.push('', 'volumes:'); vk.forEach(function (x) { L.push('  ' + yq(x) + ':'); }); W.push('Named volume' + (vk.length > 1 ? 's ' : ' ') + vk.join(', ') + ' will be created as <project>_' + vk[0] + '. To reuse the existing volume from docker run, add "external: true" under it.'); }
+  W = W.filter(function (w, k) { return W.indexOf(w) === k; });
+  return { yaml: L.join('\n') + '\n', warnings: W, count: p.services.length };
+};
+/* ---------------- SQL formatter ---------------- */
+var SQL_KW = ('SELECT FROM WHERE AND OR NOT IN IS NULL LIKE ILIKE BETWEEN EXISTS AS ON JOIN LEFT RIGHT INNER OUTER FULL CROSS NATURAL USING GROUP BY ORDER ' +
+  'HAVING LIMIT OFFSET UNION ALL DISTINCT INSERT INTO VALUES UPDATE SET DELETE CREATE TABLE VIEW INDEX UNIQUE PRIMARY KEY FOREIGN REFERENCES DEFAULT ' +
+  'CONSTRAINT CHECK DROP ALTER ADD COLUMN RENAME TO IF REPLACE CASE WHEN THEN ELSE END ASC DESC WITH RECURSIVE RETURNING CONFLICT DO NOTHING DUPLICATE ' +
+  'INTERSECT EXCEPT MINUS OVER PARTITION WINDOW ROWS RANGE PRECEDING FOLLOWING UNBOUNDED CURRENT ROW FETCH FIRST NEXT ONLY TRUE FALSE AUTO_INCREMENT ' +
+  'AUTOINCREMENT CASCADE RESTRICT TRUNCATE TEMPORARY TEMP LATERAL APPLY FOR SHARE NULLS LAST BEGIN COMMIT ROLLBACK TRANSACTION GRANT REVOKE IGNORE ANY ' +
+  'SOME INTERVAL COLLATE ESCAPE SIMILAR REGEXP RLIKE QUALIFY ENGINE CHARSET CHARACTER TOP MATERIALIZED SCHEMA DATABASE TRIGGER PROCEDURE FUNCTION RETURNS ' +
+  'LANGUAGE FILTER WITHIN EXPLAIN ANALYZE SHOW DESCRIBE USE OF NO ACTION MODIFY CHANGE FIRST AFTER').split(' ');
+var SQL_FN = ('COUNT SUM AVG MIN MAX COALESCE NULLIF IFNULL ISNULL NVL CAST CONVERT CONCAT CONCAT_WS SUBSTRING SUBSTR LOWER UPPER TRIM LTRIM RTRIM LENGTH ' +
+  'CHAR_LENGTH ROUND FLOOR CEIL CEILING ABS NOW DATE_TRUNC DATE_FORMAT DATE_ADD DATE_SUB DATEADD DATEDIFF EXTRACT TO_CHAR TO_DATE TO_TIMESTAMP STRING_AGG ' +
+  'GROUP_CONCAT ARRAY_AGG JSON_AGG JSONB_AGG JSON_EXTRACT JSON_OBJECT JSON_BUILD_OBJECT ROW_NUMBER RANK DENSE_RANK NTILE LAG LEAD FIRST_VALUE LAST_VALUE ' +
+  'GREATEST LEAST POSITION REPLACE IIF UNNEST GENERATE_SERIES ' +
+  'INT INTEGER BIGINT SMALLINT TINYINT MEDIUMINT DECIMAL NUMERIC FLOAT DOUBLE REAL VARCHAR NVARCHAR CHAR NCHAR TEXT BOOLEAN BOOL DATE TIME TIMESTAMP ' +
+  'TIMESTAMPTZ DATETIME SERIAL BIGSERIAL UUID JSON JSONB BLOB BYTEA VARBINARY BINARY ENUM').split(' ');
+var SQL_KWS = {}, SQL_FNS = {};
+SQL_KW.forEach(function (k) { SQL_KWS[k] = 1; }); SQL_FN.forEach(function (k) { SQL_FNS[k] = 1; });
+var SQL_PHRASES = ['CREATE OR REPLACE VIEW', 'CREATE TABLE IF NOT EXISTS', 'CREATE TEMPORARY TABLE', 'CREATE UNIQUE INDEX', 'CREATE MATERIALIZED VIEW',
+  'DROP TABLE IF EXISTS', 'ON DUPLICATE KEY UPDATE', 'LEFT OUTER JOIN', 'RIGHT OUTER JOIN', 'FULL OUTER JOIN', 'INSERT IGNORE INTO', 'DO UPDATE SET',
+  'GROUP BY', 'ORDER BY', 'PARTITION BY', 'UNION ALL', 'UNION DISTINCT', 'INSERT INTO', 'REPLACE INTO', 'DELETE FROM', 'LEFT JOIN', 'RIGHT JOIN',
+  'FULL JOIN', 'INNER JOIN', 'CROSS JOIN', 'NATURAL JOIN', 'CROSS APPLY', 'OUTER APPLY', 'ON CONFLICT', 'CREATE TABLE', 'CREATE VIEW', 'CREATE INDEX',
+  'ALTER TABLE', 'DROP TABLE', 'DROP VIEW', 'DROP INDEX', 'TRUNCATE TABLE', 'PRIMARY KEY', 'FOREIGN KEY', 'NOT NULL', 'IS NOT', 'NOT IN', 'NOT LIKE',
+  'NOT EXISTS', 'NOT BETWEEN', 'ON DELETE', 'ON UPDATE', 'WITH RECURSIVE', 'SELECT DISTINCT', 'DO NOTHING', 'FETCH FIRST', 'FETCH NEXT', 'FOR UPDATE', 'FOR SHARE', 'UNION'
+].map(function (p) { return p.split(' '); }).sort(function (a, b) { return b.length - a.length; });
+var SQL_CLAUSE_BLOCK = { 'SELECT': 1, 'SELECT DISTINCT': 1, 'FROM': 1, 'WHERE': 1, 'GROUP BY': 1, 'ORDER BY': 1, 'HAVING': 1, 'SET': 1, 'VALUES': 1,
+  'RETURNING': 1, 'WITH': 1, 'WITH RECURSIVE': 1, 'WINDOW': 1, 'ON DUPLICATE KEY UPDATE': 1, 'DO UPDATE SET': 1, 'QUALIFY': 1 };
+var SQL_CLAUSE_INLINE = { 'LIMIT': 1, 'OFFSET': 1, 'INSERT INTO': 1, 'INSERT IGNORE INTO': 1, 'REPLACE INTO': 1, 'UPDATE': 1, 'DELETE FROM': 1, 'DELETE': 1,
+  'CREATE TABLE': 1, 'CREATE TABLE IF NOT EXISTS': 1, 'CREATE TEMPORARY TABLE': 1, 'CREATE VIEW': 1, 'CREATE OR REPLACE VIEW': 1, 'CREATE MATERIALIZED VIEW': 1,
+  'CREATE INDEX': 1, 'CREATE UNIQUE INDEX': 1, 'ALTER TABLE': 1, 'DROP TABLE': 1, 'DROP TABLE IF EXISTS': 1, 'DROP VIEW': 1, 'DROP INDEX': 1,
+  'TRUNCATE TABLE': 1, 'ON CONFLICT': 1, 'FETCH FIRST': 1, 'FETCH NEXT': 1, 'FOR UPDATE': 1, 'FOR SHARE': 1, 'DO NOTHING': 1 };
+var SQL_SETOP = { 'UNION': 1, 'UNION ALL': 1, 'UNION DISTINCT': 1, 'INTERSECT': 1, 'EXCEPT': 1, 'MINUS': 1 };
+var SQL_COMMA_BREAK = { 'SELECT': 1, 'SELECT DISTINCT': 1, 'GROUP BY': 1, 'ORDER BY': 1, 'SET': 1, 'VALUES': 1, 'RETURNING': 1, 'WITH': 1,
+  'WITH RECURSIVE': 1, '(columns)': 1, 'ON DUPLICATE KEY UPDATE': 1, 'DO UPDATE SET': 1, 'FROM': 1, 'WINDOW': 1 };
+
+T.sqlTokenize = function (s) {
+  var toks = [], i = 0, n = s.length, m;
+  function push(type, v) { toks.push({ t: type, v: v }); }
+  while (i < n) {
+    var c = s[i], rest;
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '-' && s[i + 1] === '-' || c === '#' && /^#(\s|$)/.test(s.substr(i, 2))) { var e = s.indexOf('\n', i); if (e < 0) e = n; push('lc', s.slice(i, e).replace(/\s+$/, '')); i = e; continue; }
+    if (c === '/' && s[i + 1] === '*') { var e2 = s.indexOf('*/', i + 2); e2 = e2 < 0 ? n : e2 + 2; push('bc', s.slice(i, e2)); i = e2; continue; }
+    if (c === "'" || ((c === 'N' || c === 'n' || c === 'E' || c === 'e' || c === 'X' || c === 'x' || c === 'B' || c === 'b') && s[i + 1] === "'" && !/[\w$]/.test(s[i - 1] || ''))) {
+      var j = c === "'" ? i + 1 : i + 2;
+      while (j < n) { if (s[j] === '\\') { j += 2; continue; } if (s[j] === "'") { if (s[j + 1] === "'") { j += 2; continue; } j++; break; } j++; }
+      if (j > n) j = n;
+      push('str', s.slice(i, j)); i = j; continue;
+    }
+    if (c === '$' && (m = /^\$([A-Za-z_]\w*)?\$/.exec(s.slice(i)))) {
+      var end = s.indexOf(m[0], i + m[0].length); end = end < 0 ? n : end + m[0].length;
+      push('str', s.slice(i, end)); i = end; continue;
+    }
+    if (c === '"' || c === '`' || c === '[') {
+      var close = c === '[' ? ']' : c, k = i + 1;
+      while (k < n) { if (s[k] === close) { if (s[k + 1] === close && c !== '[') { k += 2; continue; } k++; break; } k++; }
+      push('id', s.slice(i, k)); i = k; continue;
+    }
+    rest = s.slice(i, i + 64);
+    if ((m = /^(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?/.exec(rest)) && !/[A-Za-z_]/.test(s[i + m[0].length] || '')) { push('num', m[0]); i += m[0].length; continue; }
+    if ((m = /^[A-Za-z_\u00c0-\uffff][\w$\u00c0-\uffff]*/.exec(rest))) { push('word', m[0]); i += m[0].length; continue; }
+    if ((m = /^([@:]{1,2}[A-Za-z_][\w.]*|\$\d+|\?)/.exec(rest)) && !(c === ':' && s[i + 1] === ':' && toks.length && /^(word|id|str|num|close)$/.test(toks[toks.length - 1].t) && false)) {
+      if (!(c === ':' && s[i + 1] === ':')) { push('word', m[0]); i += m[0].length; continue; }
+    }
+    if ((m = /^(::|->>|->|<=>|<>|<=|>=|!=|\|\||&&|<<|>>|[-+*\/%=<>!~^&|])/.exec(rest))) { push('op', m[0]); i += m[0].length; continue; }
+    if (c === '(') { push('open', c); i++; continue; }
+    if (c === ')') { push('close', c); i++; continue; }
+    if (c === ',') { push('comma', c); i++; continue; }
+    if (c === ';') { push('semi', c); i++; continue; }
+    if (c === '.') { push('dot', c); i++; continue; }
+    push('op', c); i++;
+  }
+  // merge multi-word keyword phrases
+  var out = [];
+  for (var a = 0; a < toks.length; a++) {
+    var tk = toks[a];
+    if (tk.t === 'word') {
+      var U = tk.v.toUpperCase(), hit = null;
+      for (var p = 0; p < SQL_PHRASES.length && !hit; p++) {
+        var ph = SQL_PHRASES[p];
+        if (ph[0] !== U || ph.length < 2) continue;
+        var ok = true;
+        for (var q = 1; q < ph.length; q++) { var nt = toks[a + q]; if (!nt || nt.t !== 'word' || nt.v.toUpperCase() !== ph[q]) { ok = false; break; } }
+        if (ok) hit = ph;
+      }
+      if (hit) {
+        out.push({ t: 'kw', v: toks.slice(a, a + hit.length).map(function (x) { return x.v; }).join(' '), u: hit.join(' ') });
+        a += hit.length - 1; continue;
+      }
+      if (SQL_KWS[U] && toks[a - 1] && toks[a - 1].t === 'dot') { out.push(tk); continue; }
+      if (SQL_KWS[U] && !(SQL_FNS[U] && toks[a + 1] && toks[a + 1].t === 'open')) { out.push({ t: 'kw', v: tk.v, u: U }); continue; }
+      if (SQL_FNS[U]) { out.push({ t: 'fn', v: tk.v, u: U }); continue; }
+    }
+    out.push(tk);
+  }
+  return out;
+};
+
+function sqlCase(tk, mode) {
+  if (tk.t !== 'kw' && tk.t !== 'fn') return tk.v;
+  return mode === 'upper' ? tk.u : mode === 'lower' ? tk.u.toLowerCase() : tk.v;
+}
+
+T.sqlMinify = function (sql, opts) {
+  opts = opts || {};
+  var toks = T.sqlTokenize(sql).filter(function (t) { return t.t !== 'lc' && t.t !== 'bc'; }), out = '', prev = null;
+  toks.forEach(function (tk) {
+    var v = sqlCase(tk, opts.keywordCase || 'preserve');
+    if (prev) {
+      var tight = /^(open|close|comma|semi|dot)$/.test(tk.t) || /^(open|comma|semi|dot)$/.test(prev.t) || (tk.t === 'op' && prev.t !== 'op') || (prev.t === 'op' && tk.t !== 'op');
+      if (tk.t === 'open' && prev.t === 'kw') tight = false;
+      if (prev.t === 'close' && /^(kw|word|fn|num|str|id)$/.test(tk.t)) tight = false;
+      if (prev.t === 'semi') tight = false;
+      if (!tight) out += ' ';
+    }
+    out += v; prev = tk;
+  });
+  return out;
+};
+
+T.sqlFormat = function (sql, opts) {
+  opts = opts || {};
+  var unit = opts.indent === 'tab' ? '\t' : ' '.repeat(opts.indent === undefined ? 2 : +opts.indent);
+  var mode = opts.keywordCase || 'upper';
+  var toks = T.sqlTokenize(sql);
+  var lines = [], cur = '', curInd = 0, lineInd = 0, level = 0, clause = null, stack = [], between = false, prev = null, forceNL = false;
+  function nl(ind) { if (cur.trim()) lines.push(cur.replace(/\s+$/, '')); cur = unit.repeat(Math.max(0, ind)); curInd = lineInd = Math.max(0, ind); prev = null; forceNL = false; }
+  function top() { return stack[stack.length - 1]; }
+  function atClause() { var t = top(); return !t || t.type === 'block'; }
+  function inlineDepth() { var d = 0; for (var k = stack.length - 1; k >= 0 && stack[k].type !== 'block'; k--) if (stack[k].type === 'inline') d++; return d; }
+  function write(tk, v) {
+    if (forceNL) nl(curInd);
+    var sp = true;
+    if (!prev) sp = false;
+    else if (/^(comma|semi|close|dot)$/.test(tk.t)) sp = false;
+    else if (prev.t === 'open' || prev.t === 'dot') sp = false;
+    else if (tk.t === 'op' && tk.v === '::' || prev.t === 'op' && prev.v === '::') sp = false;
+    else if (prev.unary) sp = false;
+    else if (tk.t === 'open' && (prev.t === 'fn' || prev.t === 'word' || prev.t === 'id') && !(prev.t !== 'fn' && /^(INSERT|REPLACE|CREATE|INTO)/.test(clause || '') && !inlineDepth())) sp = false;
+    cur += (sp ? ' ' : '') + v;
+    prev = tk;
+  }
+  for (var i = 0; i < toks.length; i++) {
+    var tk = toks[i], v = sqlCase(tk, mode), U = tk.u || '', nx = toks[i + 1];
+    if (tk.t === 'lc') { if (prev) cur += ' ' + v; else cur += v; prev = tk; forceNL = true; continue; }
+    if (tk.t === 'semi') {
+      write(tk, ';'); stack = []; level = 0; clause = null; between = false;
+      if (i < toks.length - 1) { nl(0); lines.push(''); }
+      continue;
+    }
+    if (tk.t === 'kw' && atClause()) {
+      if (SQL_CLAUSE_BLOCK[U]) { nl(level); write(tk, v); nl(level + 1); clause = U; between = false; continue; }
+      if (SQL_CLAUSE_INLINE[U]) { nl(level); write(tk, v); curInd = level + 1; clause = U; continue; }
+      if (SQL_SETOP[U]) { nl(level); write(tk, v); nl(level); clause = null; continue; }
+      if (/JOIN$|APPLY$/.test(U)) { nl(level + 1); write(tk, v); curInd = level + 2; continue; }
+      if ((U === 'AND' || U === 'OR') && !between && clause && /^(WHERE|HAVING|FROM|QUALIFY|ON CONFLICT|DELETE FROM|UPDATE)$/.test(clause)) {
+        nl(clause === 'FROM' ? level + 2 : level + 1); write(tk, v); continue;
+      }
+    }
+    if (tk.t === 'kw' && (U === 'BETWEEN' || U === 'NOT BETWEEN')) { between = true; write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'AND' && between) { between = false; write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'CASE') { write(tk, v); stack.push({ type: 'case', base: lineInd }); continue; }
+    if (tk.t === 'kw' && (U === 'WHEN' || U === 'ELSE') && top() && top().type === 'case') { nl(top().base + 1); write(tk, v); continue; }
+    if (tk.t === 'kw' && U === 'END' && top() && top().type === 'case') { var cs = stack.pop(); nl(cs.base); write(tk, v); continue; }
+    if (tk.t === 'open') {
+      var la = nx, isSub = la && la.t === 'kw' && /^(SELECT|SELECT DISTINCT|WITH|WITH RECURSIVE|VALUES)$/.test(la.u) && !(la.u === 'VALUES' && true);
+      var isCols = !isSub && atClause() && clause && /^CREATE (TEMPORARY )?TABLE/.test(clause) && !stack.some(function (s) { return s.type === 'inline'; }) && prev && prev.t !== 'fn';
+      if (isSub || isCols) {
+        write(tk, '(');
+        stack.push({ type: 'block', level: level, clause: clause, ind: lineInd });
+        level = lineInd + 1; clause = isCols ? '(columns)' : null; nl(level);
+        continue;
+      }
+      write(tk, '('); stack.push({ type: 'inline' }); continue;
+    }
+    if (tk.t === 'close') {
+      while (top() && top().type === 'case') stack.pop();
+      var o = stack.pop();
+      if (o && o.type === 'block') { nl(o.ind); write(tk, ')'); level = o.level; clause = o.clause; curInd = o.ind; continue; }
+      write(tk, ')'); continue;
+    }
+    if (tk.t === 'comma') {
+      write(tk, ',');
+      if (atClause() && clause && SQL_COMMA_BREAK[clause]) nl(clause === '(columns)' ? level : level + 1);
+      continue;
+    }
+    if (tk.t === 'op' && (tk.v === '-' || tk.v === '+') && (!prev || /^(op|open|comma|kw)$/.test(prev.t)) && !(prev && prev.t === 'kw' && /^(END|NULL|TRUE|FALSE)$/.test(prev.u))) {
+      write(tk, v); prev = { t: 'op', v: tk.v, unary: true }; continue;
+    }
+    write(tk, v);
+  }
+  nl(0);
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+/* ---------------- Shell words (shared by cURL and docker run converters) ---------------- */
+// Splits a POSIX shell command line into words. Handles '...', "...", $'...', backslash escapes and
+// line continuations (\ , ^ and ` at end of line). Operators (&&, ||, ;, |, newline) become {op: '...'}.
+T.shellSplit = function (s) {
+  s = String(s).replace(/\r\n?/g, '\n').replace(/[ \t]*(\\|\^|`)\n/g, ' ');
+  var out = [], i = 0, n = s.length, w = null;
+  function add(ch) { w = (w === null ? '' : w) + ch; }
+  function end() { if (w !== null) { out.push(w); w = null; } }
+  while (i < n) {
+    var c = s[i];
+    if (c === ' ' || c === '\t') { end(); i++; continue; }
+    if (c === '\n' || c === ';' || c === '&' && s[i + 1] === '&' || c === '|') {
+      end();
+      var op = c === '\n' ? '\n' : c === ';' ? ';' : (s[i + 1] === c ? c + c : c);
+      out.push({ op: op }); i += op.length === 2 ? 2 : 1; continue;
+    }
+    if (c === '#' && w === null) { while (i < n && s[i] !== '\n') i++; continue; }
+    if (c === '\\') { if (i + 1 < n) add(s[i + 1]); i += 2; continue; }
+    if (c === "'") { var e = s.indexOf("'", i + 1); if (e < 0) e = n; add(s.slice(i + 1, e)); i = e + 1; continue; }
+    if (c === '$' && s[i + 1] === "'") {
+      i += 2; var buf = '';
+      while (i < n && s[i] !== "'") {
+        if (s[i] === '\\' && i + 1 < n) {
+          var x = s[i + 1], m;
+          var map = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+          if (map[x] !== undefined) { buf += map[x]; i += 2; }
+          else if ((m = /^x([0-9a-fA-F]{1,2})/.exec(s.slice(i + 1)))) { buf += String.fromCharCode(parseInt(m[1], 16)); i += 1 + m[0].length; }
+          else if ((m = /^u([0-9a-fA-F]{1,4})/.exec(s.slice(i + 1))) || (m = /^U([0-9a-fA-F]{1,8})/.exec(s.slice(i + 1)))) { buf += String.fromCodePoint(parseInt(m[1], 16)); i += 1 + m[0].length; }
+          else if ((m = /^[0-7]{1,3}/.exec(s.slice(i + 1)))) { buf += String.fromCharCode(parseInt(m[0], 8)); i += 1 + m[0].length; }
+          else { buf += '\\' + x; i += 2; }
+        } else buf += s[i++];
+      }
+      // $'...' strings may contain UTF-8 bytes written as \xHH: decode them
+      if (/[\x80-\xff]/.test(buf) && !/[^\x00-\xff]/.test(buf)) { try { buf = decodeURIComponent(escape(buf)); } catch (er) { /* keep */ } }
+      add(buf); i++; continue;
+    }
+    if (c === '"') {
+      i++; var b2 = '';
+      while (i < n && s[i] !== '"') {
+        if (s[i] === '\\' && i + 1 < n && '$`"\\\n'.indexOf(s[i + 1]) >= 0) { if (s[i + 1] !== '\n') b2 += s[i + 1]; i += 2; }
+        else b2 += s[i++];
+      }
+      add(b2); i++; continue;
+    }
+    add(c); i++;
+  }
+  end();
+  return out;
+};
+
+/* ---------------- cURL to code ---------------- */
+var CURL_VAL = { '-X': 'request', '--request': 'request', '-H': 'header', '--header': 'header', '-d': 'data', '--data': 'data', '--data-ascii': 'data',
+  '--data-raw': 'data-raw', '--data-binary': 'data-binary', '--data-urlencode': 'data-urlencode', '--json': 'json', '-u': 'user', '--user': 'user',
+  '-F': 'form', '--form': 'form', '--form-string': 'form-string', '-b': 'cookie', '--cookie': 'cookie', '-A': 'user-agent', '--user-agent': 'user-agent',
+  '-e': 'referer', '--referer': 'referer', '--url': 'url', '-m': 'max-time', '--max-time': 'max-time', '--connect-timeout': 'connect-timeout',
+  '-x': 'proxy', '--proxy': 'proxy', '-o': 'output', '--output': 'output', '-w': 'write-out', '--write-out': 'write-out', '-c': 'cookie-jar',
+  '--cookie-jar': 'cookie-jar', '--retry': 'retry', '--cacert': 'cacert', '-E': 'cert', '--cert': 'cert', '--key': 'key', '-T': 'upload-file',
+  '--upload-file': 'upload-file', '--oauth2-bearer': 'bearer', '-r': 'range', '--range': 'range', '--resolve': 'resolve', '--max-redirs': 'max-redirs',
+  '-K': 'config', '--config': 'config', '--aws-sigv4': 'aws', '--proxy-user': 'proxy-user', '-U': 'proxy-user', '--interface': 'interface',
+  '--limit-rate': 'limit-rate', '--retry-delay': 'retry-delay', '--retry-max-time': 'retry-max-time', '-D': 'dump-header', '--dump-header': 'dump-header',
+  '--trace': 'trace', '--trace-ascii': 'trace', '--stderr': 'stderr', '-Y': 'skip', '-y': 'skip', '-z': 'skip', '--expect100-timeout': 'skip' };
+var CURL_BOOL = { '-L': 'location', '--location': 'location', '-k': 'insecure', '--insecure': 'insecure', '--compressed': 'compressed', '-G': 'get', '--get': 'get',
+  '-I': 'head', '--head': 'head', '-s': 1, '--silent': 1, '-S': 1, '--show-error': 1, '-v': 1, '--verbose': 1, '-i': 1, '--include': 1, '-f': 'fail',
+  '--fail': 'fail', '--fail-with-body': 'fail', '-O': 'remote-name', '--remote-name': 'remote-name', '-#': 1, '--progress-bar': 1, '-N': 1, '--no-buffer': 1,
+  '--http1.1': 1, '--http2': 1, '--http1.0': 1, '--http2-prior-knowledge': 1, '--http3': 1, '-4': 1, '-6': 1, '--ipv4': 1, '--ipv6': 1, '-n': 1, '--netrc': 1,
+  '--location-trusted': 'location', '-g': 1, '--globoff': 1, '-q': 1, '--disable': 1, '--no-progress-meter': 1, '--digest': 'digest', '--basic': 1,
+  '--ntlm': 'ntlm', '--negotiate': 'ntlm', '-j': 1, '--junk-session-cookies': 1, '--tlsv1.2': 1, '--tlsv1.3': 1, '--path-as-is': 1, '-Z': 1, '--parallel': 1 };
+
+function curlUrlencode(s) { return encodeURIComponent(s).replace(/%20/g, '+').replace(/[!'()*]/g, function (c) { return '%' + c.charCodeAt(0).toString(16).toUpperCase(); }); }
+function hdrFind(h, name) { name = name.toLowerCase(); for (var k = 0; k < h.length; k++) if (h[k][0].toLowerCase() === name) return k; return -1; }
+
+T.curlParse = function (text) {
+  var words = T.shellSplit(String(text).trim().replace(/^\$\s+/, '')), r = { method: null, url: null, headers: [], data: [], form: [], auth: null, warnings: [],
+    insecure: false, follow: false, compressed: false, get: false, head: false, timeout: null, proxy: null, files: [], digest: false };
+  var k = 0;
+  while (k < words.length && (typeof words[k] !== 'string' || !/(^|\/)curl(\.exe)?$/i.test(words[k]))) k++;
+  if (k >= words.length) { if (typeof words[0] === 'string' && /^(https?|ftp):\/\//i.test(words[0])) k = -1; else throw new Error('No curl command found: paste a command that starts with "curl".'); }
+  var rest = [];
+  for (k = k + 1; k < words.length; k++) {
+    if (typeof words[k] !== 'string') {
+      if (words[k].op === '\n' && rest.length && !words.slice(k + 1).some(function (x) { return typeof x === 'string'; })) break;
+      if (words[k].op === '\n') { r.warnings.push('The command spans several lines without a trailing "\\": only the first line was used.'); break; }
+      r.warnings.push('Ignored everything after "' + words[k].op + '" (only the curl command itself is converted).'); break;
+    }
+    rest.push(words[k]);
+  }
+  var endOpts = false;
+  for (var i = 0; i < rest.length; i++) {
+    var a = rest[i], opt = null, val = null;
+    if (!endOpts && a === '--') { endOpts = true; continue; }
+    if (!endOpts && /^--[a-z0-9]/i.test(a)) {
+      var eq = null;
+      if (CURL_VAL[a]) opt = a;
+      else if (CURL_BOOL[a]) opt = a;
+      else if (/^--no-/.test(a)) { if (a === '--no-location') r.follow = false; continue; }
+      else { r.warnings.push('Unknown option ' + a + ' was ignored.'); continue; }
+      if (CURL_VAL[opt]) { val = rest[++i]; if (val === undefined) throw new Error('Option ' + opt + ' needs a value.'); }
+    } else if (!endOpts && /^-[^-]/.test(a) && a.length > 1) {
+      // short options may be combined (-sSL) and values may be attached (-XPOST, -HAccept:x)
+      for (var j = 1; j < a.length; j++) {
+        var f = '-' + a[j];
+        if (CURL_VAL[f]) { val = a.slice(j + 1) || rest[++i]; if (val === undefined) throw new Error('Option ' + f + ' needs a value.'); opt = f; break; }
+        if (CURL_BOOL[f]) { if (j < a.length - 1) applyCurl(r, f, null); else opt = f; continue; }
+        r.warnings.push('Unknown option ' + f + ' was ignored.');
+      }
+      if (!opt) continue;
+    } else {
+      if (!r.url) r.url = a; else r.warnings.push('Extra URL "' + a + '" ignored (only the first URL is converted).');
+      continue;
+    }
+    applyCurl(r, opt, val);
+  }
+  if (!r.url) throw new Error('No URL found in the curl command.');
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(r.url)) r.url = 'http://' + r.url;
+  // body
+  var body = null;
+  if (r.data.length) body = r.data.join('&');
+  if (r.get && body !== null) { r.url += (r.url.indexOf('?') >= 0 ? '&' : '?') + body; body = null; }
+  r.body = body;
+  if (!r.method) r.method = r.head ? 'HEAD' : (r.get ? 'GET' : (body !== null || r.form.length || r.uploadFile ? (r.uploadFile && !r.data.length ? 'PUT' : 'POST') : 'GET'));
+  r.method = r.method.toUpperCase();
+  var ct = hdrFind(r.headers, 'content-type');
+  if (body !== null && !r.form.length && ct < 0) { r.headers.push(['Content-Type', 'application/x-www-form-urlencoded']); r.implicitForm = true; }
+  ct = hdrFind(r.headers, 'content-type');
+  r.contentType = ct >= 0 ? r.headers[ct][1] : '';
+  r.json = undefined;
+  if (body !== null && /json/i.test(r.contentType)) { try { r.json = JSON.parse(body); } catch (e) { r.warnings.push('The body is sent as JSON but is not valid JSON: it is passed through as a raw string.'); } }
+  r.formPairs = null;
+  if (body !== null && /x-www-form-urlencoded/i.test(r.contentType) && !r.dataFile) {
+    var pairs = body.split('&').filter(Boolean).map(function (p) { var e = p.indexOf('='); var kk = e < 0 ? p : p.slice(0, e), vv = e < 0 ? '' : p.slice(e + 1);
+      try { return [decodeURIComponent(kk.replace(/\+/g, ' ')), decodeURIComponent(vv.replace(/\+/g, ' '))]; } catch (er) { return null; } });
+    if (pairs.length && pairs.every(Boolean)) r.formPairs = pairs;
+  }
+  if (r.form.length && ct >= 0 && /multipart/i.test(r.contentType)) { r.headers.splice(ct, 1); r.warnings.push('Removed the explicit multipart Content-Type header: the HTTP library must generate it with the boundary.'); }
+  return r;
+};
+
+function applyCurl(r, opt, val) {
+  var name = CURL_VAL[opt] || CURL_BOOL[opt], m;
+  switch (name) {
+    case 'request': r.method = val; break;
+    case 'header':
+      if (val.charAt(0) === '@') { r.warnings.push('Headers read from file ' + val.slice(1) + ' are not included.'); break; }
+      m = /^([^:;]+)(?::\s?(.*)|;)$/.exec(val);
+      if (!m) { r.warnings.push('Could not read header "' + val + '".'); break; }
+      if (m[2] === '' && val.indexOf(':') >= 0) { var ix = hdrFind(r.headers, m[1].trim()); if (ix >= 0) r.headers.splice(ix, 1); break; } // "X-Foo:" removes a header
+      r.headers.push([m[1].trim(), m[2] === undefined ? '' : m[2]]); break;
+    case 'data': case 'data-binary':
+      if (val.charAt(0) === '@') { r.dataFile = val.slice(1); r.warnings.push('The body is read from the file "' + val.slice(1) + '": the code below sends a placeholder, read the file yourself.'); r.data.push('<contents of ' + val.slice(1) + '>'); break; }
+      r.data.push(name === 'data' ? val.replace(/[\r\n]/g, '') && val : val); break;
+    case 'data-raw': r.data.push(val); break;
+    case 'data-urlencode':
+      m = /^([^=@]*)([=@])([\s\S]*)$/.exec(val);
+      if (!m) r.data.push(curlUrlencode(val));
+      else if (m[2] === '@') { r.dataFile = m[3]; r.warnings.push('--data-urlencode reads ' + m[3] + ' from a file: replace the placeholder.'); r.data.push((m[1] ? m[1] + '=' : '') + curlUrlencode('<contents of ' + m[3] + '>')); }
+      else r.data.push((m[1] ? m[1] + '=' : '') + curlUrlencode(m[3]));
+      break;
+    case 'json':
+      r.data.push(val);
+      if (hdrFind(r.headers, 'content-type') < 0) r.headers.push(['Content-Type', 'application/json']);
+      if (hdrFind(r.headers, 'accept') < 0) r.headers.push(['Accept', 'application/json']);
+      break;
+    case 'user': m = val.indexOf(':'); r.auth = m < 0 ? [val, ''] : [val.slice(0, m), val.slice(m + 1)]; if (m < 0) r.warnings.push('-u without a password: curl would prompt for it; the code uses an empty password.'); break;
+    case 'form': case 'form-string':
+      m = /^([^=]+)=([\s\S]*)$/.exec(val);
+      if (!m) { r.warnings.push('Could not read form field "' + val + '".'); break; }
+      var v = m[2], fld = { name: m[1], value: v };
+      if (name === 'form') {
+        var parts = v.split(';'), first = parts[0];
+        if (first.charAt(0) === '@' || first.charAt(0) === '<') { fld.file = first.slice(1); fld.value = null; if (first.charAt(0) === '<') { fld.file = null; fld.value = '<contents of ' + first.slice(1) + '>'; } }
+        else fld.value = first;
+        parts.slice(1).forEach(function (p) { var q = /^\s*(type|filename)=(.*)$/.exec(p); if (q) fld[q[1]] = q[2].replace(/^"|"$/g, ''); });
+      }
+      r.form.push(fld); break;
+    case 'cookie':
+      if (val.indexOf('=') < 0) { r.warnings.push('-b ' + val + ' reads cookies from a file: not converted.'); break; }
+      var ci = hdrFind(r.headers, 'cookie');
+      if (ci >= 0) r.headers[ci][1] += '; ' + val; else r.headers.push(['Cookie', val]);
+      break;
+    case 'user-agent': r.headers.push(['User-Agent', val]); break;
+    case 'referer': r.headers.push(['Referer', val.replace(/;auto$/, '')]); break;
+    case 'bearer': r.headers.push(['Authorization', 'Bearer ' + val]); break;
+    case 'range': r.headers.push(['Range', 'bytes=' + val]); break;
+    case 'url': if (!r.url) r.url = val; break;
+    case 'max-time': r.timeout = parseFloat(val); break;
+    case 'connect-timeout': if (r.timeout === null) r.timeout = parseFloat(val); break;
+    case 'proxy': r.proxy = /^[a-z0-9]+:\/\//i.test(val) ? val : 'http://' + val; break;
+    case 'location': r.follow = true; break;
+    case 'insecure': r.insecure = true; break;
+    case 'compressed': r.compressed = true; break;
+    case 'get': r.get = true; break;
+    case 'head': r.head = true; break;
+    case 'digest': r.digest = true; r.warnings.push('--digest authentication is converted as Basic auth: switch to your library\'s digest support.'); break;
+    case 'ntlm': r.warnings.push(opt + ' authentication is not converted.'); break;
+    case 'upload-file': r.uploadFile = val; r.data.push('<contents of ' + val + '>'); r.dataFile = val; r.warnings.push('-T uploads the file ' + val + ': the code sends a placeholder body, read the file yourself.'); break;
+    case 'output': case 'remote-name': r.warnings.push('Output to a file (' + opt + ') is not converted: write the response body yourself.'); break;
+    case 'cacert': case 'cert': case 'key': r.warnings.push(opt + ' ' + val + ' (client/CA certificates) is not converted.'); break;
+    case 'aws': r.warnings.push('--aws-sigv4 signing is not converted: use an AWS SDK.'); break;
+    case 'config': r.warnings.push('Options read from a config file (' + opt + ') are not included.'); break;
+    default: break; // silent / verbose / output formatting options don't change the request
+  }
+}
+
+/* code generators */
+function jstr(s) { return JSON.stringify(s); }
+function pystr(s) {
+  var q = s.indexOf("'") >= 0 && s.indexOf('"') < 0 ? '"' : "'";
+  return q + s.replace(/\\/g, '\\\\').replace(new RegExp(q, 'g'), '\\' + q).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, function (c) { return '\\x' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }) + q;
+}
+function phpstr(s) { return /[\n\r\t\x00-\x1f]/.test(s) ? '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, function (c) { return '\\x' + ('0' + c.charCodeAt(0).toString(16)).slice(-2); }) + '"' : "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'"; }
+function pyval(v, ind) {
+  ind = ind || '';
+  var nx = ind + '    ';
+  if (v === null) return 'None';
+  if (v === true) return 'True';
+  if (v === false) return 'False';
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') return pystr(v);
+  if (Array.isArray(v)) return v.length ? '[\n' + v.map(function (x) { return nx + pyval(x, nx); }).join(',\n') + ',\n' + ind + ']' : '[]';
+  var ks = Object.keys(v);
+  return ks.length ? '{\n' + ks.map(function (k) { return nx + pystr(k) + ': ' + pyval(v[k], nx); }).join(',\n') + ',\n' + ind + '}' : '{}';
+}
+function jsval(v, ind) { return JSON.stringify(v, null, 2).replace(/\n/g, '\n' + ind); }
+function phpval(v, ind) {
+  ind = ind || ''; var nx = ind + '    ';
+  if (v === null) return 'null';
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string') return phpstr(v);
+  if (Array.isArray(v)) return v.length ? '[\n' + v.map(function (x) { return nx + phpval(x, nx); }).join(',\n') + ',\n' + ind + ']' : '[]';
+  var ks = Object.keys(v);
+  return ks.length ? '[\n' + ks.map(function (k) { return nx + phpstr(k) + ' => ' + phpval(v[k], nx); }).join(',\n') + ',\n' + ind + ']' : 'new stdClass()';
+}
+function b64ascii(s) { try { return typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(s))) : Buffer.from(s, 'utf8').toString('base64'); } catch (e) { return ''; } }
+
+T.curlToPython = function (r) {
+  var L = ['import requests', ''], args = ['url'], hs = r.headers.slice(), cookies = null;
+  var ci = hdrFind(hs, 'cookie');
+  if (ci >= 0) { cookies = hs[ci][1].split(/;\s*/).filter(Boolean).map(function (p) { var e = p.indexOf('='); return [p.slice(0, e < 0 ? p.length : e).trim(), e < 0 ? '' : p.slice(e + 1)]; }); hs.splice(ci, 1); }
+  var useJson = r.json !== undefined, useForm = !useJson && r.formPairs && r.implicitForm;
+  if (useJson) { var ct = hdrFind(hs, 'content-type'); if (ct >= 0 && /^application\/json$/i.test(hs[ct][1].trim())) hs.splice(ct, 1); }
+  if (useForm) hs.splice(hdrFind(hs, 'content-type'), 1);
+  L.push('url = ' + pystr(r.url));
+  if (hs.length) { L.push('headers = {'); hs.forEach(function (h) { L.push('    ' + pystr(h[0]) + ': ' + pystr(h[1]) + ','); }); L.push('}'); args.push('headers=headers'); }
+  if (cookies) { L.push('cookies = {'); cookies.forEach(function (c) { L.push('    ' + pystr(c[0]) + ': ' + pystr(c[1]) + ','); }); L.push('}'); args.push('cookies=cookies'); }
+  if (r.body !== null) {
+    if (useJson) { L.push('json_data = ' + pyval(r.json)); args.push('json=json_data'); }
+    else if (useForm) {
+      var dup = {}, hasDup = r.formPairs.some(function (p) { if (dup[p[0]]) return true; dup[p[0]] = 1; return false; });
+      if (hasDup) { L.push('data = ['); r.formPairs.forEach(function (p) { L.push('    (' + pystr(p[0]) + ', ' + pystr(p[1]) + '),'); }); L.push(']'); }
+      else { L.push('data = {'); r.formPairs.forEach(function (p) { L.push('    ' + pystr(p[0]) + ': ' + pystr(p[1]) + ','); }); L.push('}'); }
+      args.push('data=data');
+    } else { L.push('data = ' + pystr(r.body)); args.push(/[^\x00-\x7f]/.test(r.body) ? "data=data.encode('utf-8')" : 'data=data'); }
+  }
+  if (r.form.length) {
+    var plain = r.form.filter(function (f) { return !f.file; }), files = r.form.filter(function (f) { return f.file; });
+    if (files.length) {
+      L.push('files = {');
+      files.forEach(function (f) { var fname = f.filename || f.file.split('/').pop(); L.push('    ' + pystr(f.name) + ': (' + pystr(fname) + ', open(' + pystr(f.file) + ", 'rb')" + (f.type ? ', ' + pystr(f.type) : '') + '),'); });
+      L.push('}'); args.push('files=files');
+    } else { args.push('files=files'); L.push('files = {'); plain.forEach(function (f) { L.push('    ' + pystr(f.name) + ': (None, ' + pystr(f.value) + '),'); }); L.push('}'); plain = []; }
+    if (plain.length) { L.push('data = {'); plain.forEach(function (f) { L.push('    ' + pystr(f.name) + ': ' + pystr(f.value) + ','); }); L.push('}'); args.push('data=data'); }
+  }
+  if (r.auth) args.push('auth=(' + pystr(r.auth[0]) + ', ' + pystr(r.auth[1]) + ')');
+  if (r.proxy) { L.push('proxies = {' + pystr('http') + ': ' + pystr(r.proxy) + ', ' + pystr('https') + ': ' + pystr(r.proxy) + '}'); args.push('proxies=proxies'); }
+  if (r.timeout) args.push('timeout=' + r.timeout);
+  if (r.insecure) args.push('verify=False');
+  if (r.method === 'HEAD' && r.follow) args.push('allow_redirects=True');
+  L.push('');
+  var fn = { GET: 'get', POST: 'post', PUT: 'put', PATCH: 'patch', DELETE: 'delete', HEAD: 'head', OPTIONS: 'options' }[r.method];
+  var call = fn ? 'requests.' + fn + '(' : 'requests.request(' + pystr(r.method) + ', ';
+  var one = call + args.join(', ') + ')';
+  L.push('response = ' + (one.length <= 88 ? one : call + '\n    ' + args.join(',\n    ') + ',\n)'));
+  L.push('print(response.status_code)', 'print(response.text)');
+  return L.join('\n') + '\n';
+};
+
+T.curlToFetch = function (r) {
+  var L = [], o = [], hs = r.headers.slice();
+  if (r.auth) hs.push(['Authorization', 'Basic ' + b64ascii(r.auth[0] + ':' + r.auth[1])]);
+  if (r.method !== 'GET') o.push('  method: ' + jstr(r.method));
+  if (hs.length) o.push('  headers: {\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') + '\n  }');
+  if (r.body !== null) o.push('  body: ' + (r.json !== undefined ? 'JSON.stringify(' + jsval(r.json, '  ') + ')' : r.formPairs && r.implicitForm ? 'new URLSearchParams(' + jsval(r.formPairs.reduce(function (a, p) { a.push(p); return a; }, []), '  ') + ')' : jstr(r.body)));
+  if (r.form.length) {
+    L.push('const form = new FormData();');
+    r.form.forEach(function (f) {
+      if (f.file) L.push('form.append(' + jstr(f.name) + ', fileInput.files[0], ' + jstr(f.filename || f.file.split('/').pop()) + '); // the file ' + f.file + ' (in Node 20+: await fs.openAsBlob(' + jstr(f.file) + '))');
+      else L.push('form.append(' + jstr(f.name) + ', ' + jstr(f.value) + ');');
+    });
+    L.push('');
+    o.push('  body: form');
+  }
+  if (r.timeout) o.push('  signal: AbortSignal.timeout(' + Math.round(r.timeout * 1000) + ')');
+  if (r.insecure) L.unshift('// -k/--insecure has no fetch equivalent in browsers. In Node you can (for testing only) run with NODE_TLS_REJECT_UNAUTHORIZED=0.');
+  if (hs.some(function (h) { return /^(cookie|user-agent|referer|host|accept-encoding|content-length|connection|origin)$/i.test(h[0]); })) L.unshift('// Note: browsers silently drop "forbidden" headers such as Cookie, User-Agent, Referer and Host. This runs as-is in Node 18+.');
+  if (r.proxy) L.unshift('// Proxy ' + r.proxy + ': fetch has no proxy option; in Node use undici\'s ProxyAgent as the "dispatcher" option.');
+  L.push('const response = await fetch(' + jstr(r.url) + (o.length ? ', {\n' + o.join(',\n') + '\n}' : '') + ');');
+  L.push('console.log(response.status);', 'console.log(await response.text());');
+  return L.join('\n') + '\n';
+};
+
+T.curlToAxios = function (r) {
+  var L = ['const axios = require("axios");'], o = [], pre = [], hs = r.headers.slice();
+  if (r.insecure) { L.push('const https = require("https");'); }
+  if (r.form.length) { L.push('const FormData = require("form-data");'); if (r.form.some(function (f) { return f.file; })) L.push('const fs = require("fs");'); }
+  L.push('');
+  if (r.form.length) {
+    pre.push('const form = new FormData();');
+    r.form.forEach(function (f) { pre.push('form.append(' + jstr(f.name) + ', ' + (f.file ? 'fs.createReadStream(' + jstr(f.file) + ')' : jstr(f.value)) + ');'); });
+    pre.push('');
+  }
+  o.push('  method: ' + jstr(r.method.toLowerCase()), '  url: ' + jstr(r.url));
+  if (r.form.length) o.push('  headers: {\n    ...form.getHeaders()' + (hs.length ? ',\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') : '') + '\n  }');
+  else if (hs.length) o.push('  headers: {\n' + hs.map(function (h) { return '    ' + jstr(h[0]) + ': ' + jstr(h[1]); }).join(',\n') + '\n  }');
+  if (r.body !== null) o.push('  data: ' + (r.json !== undefined ? jsval(r.json, '  ') : jstr(r.body)));
+  if (r.form.length) o.push('  data: form');
+  if (r.auth) o.push('  auth: { username: ' + jstr(r.auth[0]) + ', password: ' + jstr(r.auth[1]) + ' }');
+  if (r.timeout) o.push('  timeout: ' + Math.round(r.timeout * 1000));
+  if (r.insecure) o.push('  httpsAgent: new https.Agent({ rejectUnauthorized: false })');
+  if (r.proxy) { var pm = /^(\w+):\/\/(?:([^:@]*)(?::([^@]*))?@)?([^:\/]+)(?::(\d+))?/.exec(r.proxy); if (pm) o.push('  proxy: { protocol: ' + jstr(pm[1]) + ', host: ' + jstr(pm[4]) + ', port: ' + (pm[5] || (pm[1] === 'https' ? 443 : 1080)) + (pm[2] ? ', auth: { username: ' + jstr(decodeURIComponent(pm[2])) + ', password: ' + jstr(decodeURIComponent(pm[3] || '')) + ' }' : '') + ' }'); }
+  return L.concat(pre).join('\n') + 'axios({\n' + o.join(',\n') + '\n})\n  .then((response) => {\n    console.log(response.status);\n    console.log(response.data);\n  })\n  .catch((error) => console.error(error.response ? error.response.status : error.message));\n';
+};
+
+T.curlToGo = function (r) {
+  var imp = { 'fmt': 1, 'io': 1, 'net/http': 1 }, B = [];
+  var bodyVar = 'nil';
+  if (r.body !== null) { imp.strings = 1; bodyVar = 'body'; B.push('\tbody := strings.NewReader(' + (r.body.indexOf('`') < 0 && /\n/.test(r.body) ? '`' + r.body + '`' : jstr(r.body)) + ')'); }
+  if (r.form.length) {
+    imp.bytes = 1; imp['mime/multipart'] = 1; bodyVar = 'payload';
+    B.push('\tpayload := &bytes.Buffer{}', '\twriter := multipart.NewWriter(payload)');
+    r.form.forEach(function (f) {
+      if (f.file) {
+        imp.os = 1; imp['path/filepath'] = 1;
+        B.push('\t{', '\t\tf, err := os.Open(' + jstr(f.file) + ')', '\t\tif err != nil {', '\t\t\tpanic(err)', '\t\t}', '\t\tdefer f.Close()',
+          '\t\tpart, err := writer.CreateFormFile(' + jstr(f.name) + ', ' + (f.filename ? jstr(f.filename) : 'filepath.Base(' + jstr(f.file) + ')') + ')', '\t\tif err != nil {', '\t\t\tpanic(err)', '\t\t}',
+          '\t\tif _, err := io.Copy(part, f); err != nil {', '\t\t\tpanic(err)', '\t\t}', '\t}');
+      } else B.push('\t_ = writer.WriteField(' + jstr(f.name) + ', ' + jstr(f.value) + ')');
+    });
+    B.push('\twriter.Close()');
+  }
+  B.push('', '\treq, err := http.NewRequest(' + jstr(r.method) + ', ' + jstr(r.url) + ', ' + bodyVar + ')', '\tif err != nil {', '\t\tpanic(err)', '\t}');
+  r.headers.forEach(function (h) { B.push('\treq.Header.' + (h[0].toLowerCase() === 'host' ? 'Set' : 'Set') + '(' + jstr(h[0]) + ', ' + jstr(h[1]) + ')'); });
+  if (hdrFind(r.headers, 'host') >= 0) B.push('\treq.Host = req.Header.Get("Host")');
+  if (r.form.length) B.push('\treq.Header.Set("Content-Type", writer.FormDataContentType())');
+  if (r.auth) B.push('\treq.SetBasicAuth(' + jstr(r.auth[0]) + ', ' + jstr(r.auth[1]) + ')');
+  var cl = [];
+  if (r.timeout) { imp.time = 1; cl.push('\t\tTimeout: ' + (r.timeout >= 1 && r.timeout === Math.round(r.timeout) ? r.timeout + ' * time.Second' : Math.round(r.timeout * 1000) + ' * time.Millisecond') + ','); }
+  if (r.insecure || r.proxy) {
+    var tr = [];
+    if (r.insecure) { imp['crypto/tls'] = 1; tr.push('\t\t\tTLSClientConfig: &tls.Config{InsecureSkipVerify: true},'); }
+    if (r.proxy) { imp['net/url'] = 1; B.push('\tproxyURL, _ := url.Parse(' + jstr(r.proxy) + ')'); tr.push('\t\t\tProxy:' + (r.insecure ? '           ' : ' ') + 'http.ProxyURL(proxyURL),'); }
+    cl.push('\t\tTransport: &http.Transport{\n' + tr.join('\n') + '\n\t\t},');
+  }
+  B.push('', cl.length ? '\tclient := &http.Client{\n' + cl.join('\n') + '\n\t}' : '\tclient := &http.Client{}');
+  B.push('\tresp, err := client.Do(req)', '\tif err != nil {', '\t\tpanic(err)', '\t}', '\tdefer resp.Body.Close()', '', '\trespBody, err := io.ReadAll(resp.Body)', '\tif err != nil {', '\t\tpanic(err)', '\t}',
+    '\tfmt.Println(resp.Status)', '\tfmt.Println(string(respBody))');
+  var imports = Object.keys(imp).sort();
+  return 'package main\n\nimport (\n' + imports.map(function (x) { return '\t"' + x + '"'; }).join('\n') + '\n)\n\nfunc main() {\n' + B.join('\n').replace(/^\n/, '') + '\n}\n';
+};
+
+T.curlToPhp = function (r) {
+  var L = ['<?php', '', '$ch = curl_init();', 'curl_setopt($ch, CURLOPT_URL, ' + phpstr(r.url) + ');', 'curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);'];
+  if (r.method === 'HEAD') L.push('curl_setopt($ch, CURLOPT_NOBODY, true);');
+  else if (r.method !== 'GET' && !(r.method === 'POST' && (r.body !== null || r.form.length))) L.push('curl_setopt($ch, CURLOPT_CUSTOMREQUEST, ' + phpstr(r.method) + ');');
+  if (r.headers.length) { L.push('curl_setopt($ch, CURLOPT_HTTPHEADER, ['); r.headers.forEach(function (h) { L.push('    ' + phpstr(h[0] + ': ' + h[1]) + ','); }); L.push(']);'); }
+  if (r.body !== null) L.push('curl_setopt($ch, CURLOPT_POSTFIELDS, ' + phpstr(r.body) + ');');
+  if (r.form.length) {
+    L.push('curl_setopt($ch, CURLOPT_POSTFIELDS, [');
+    r.form.forEach(function (f) { L.push('    ' + phpstr(f.name) + ' => ' + (f.file ? 'new CURLFile(' + phpstr(f.file) + (f.type || f.filename ? ', ' + phpstr(f.type || '') + (f.filename ? ', ' + phpstr(f.filename) : '') : '') + ')' : phpstr(f.value)) + ','); });
+    L.push(']);');
+  }
+  if (r.auth) L.push('curl_setopt($ch, CURLOPT_USERPWD, ' + phpstr(r.auth[0] + ':' + r.auth[1]) + ');');
+  if (r.digest) L.push('curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);');
+  if (r.follow) L.push('curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);');
+  if (r.compressed) L.push("curl_setopt($ch, CURLOPT_ENCODING, ''); // --compressed: accept and decode gzip/deflate/br");
+  if (r.insecure) L.push('curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);', 'curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);');
+  if (r.timeout) L.push('curl_setopt($ch, CURLOPT_TIMEOUT, ' + Math.ceil(r.timeout) + ');');
+  if (r.proxy) L.push('curl_setopt($ch, CURLOPT_PROXY, ' + phpstr(r.proxy) + ');');
+  L.push('', '$response = curl_exec($ch);', 'if ($response === false) {', "    echo 'cURL error: ' . curl_error($ch) . PHP_EOL;", '} else {',
+    '    echo curl_getinfo($ch, CURLINFO_HTTP_CODE) . PHP_EOL;', '    echo $response . PHP_EOL;', '}', 'curl_close($ch);');
+  return L.join('\n') + '\n';
+};
+T.CURL_LANGS = { python: T.curlToPython, fetch: T.curlToFetch, axios: T.curlToAxios, go: T.curlToGo, php: T.curlToPhp };
+/* ---------------- .gitignore generator & tester ---------------- */
+T.GITIGNORE = {
+  Node: { label: 'Node.js / npm / Yarn / pnpm', body: '# Dependencies\nnode_modules/\njspm_packages/\n.pnpm-store/\n\n# Logs\nlogs/\n*.log\nnpm-debug.log*\nyarn-debug.log*\nyarn-error.log*\npnpm-debug.log*\n\n# Build output and caches\ndist/\nbuild/\ncoverage/\n.nyc_output/\n.cache/\n.parcel-cache/\n.next/\n.nuxt/\n.svelte-kit/\n.turbo/\n.vite/\n.eslintcache\n*.tsbuildinfo\n\n# Yarn Berry (keep the files that should be committed)\n.yarn/*\n!.yarn/patches\n!.yarn/plugins\n!.yarn/releases\n!.yarn/sdks\n!.yarn/versions\n.pnp.*\n\n# Environment files (commit a .env.example instead)\n.env\n.env.*\n!.env.example' },
+  Python: { label: 'Python', body: '# Byte-compiled files\n__pycache__/\n*.py[cod]\n*$py.class\n\n# Virtual environments\n.venv/\nvenv/\nenv/\nENV/\n\n# Packaging\nbuild/\ndist/\n*.egg-info/\n.eggs/\nwheels/\n*.egg\n\n# Test, type-check and lint caches\n.pytest_cache/\n.coverage\n.coverage.*\nhtmlcov/\n.tox/\n.nox/\n.mypy_cache/\n.ruff_cache/\n.pytype/\n\n# Jupyter\n.ipynb_checkpoints/\n\n# Environment files\n.env\n.env.*\n!.env.example' },
+  Java: { label: 'Java (Maven / Gradle)', body: '# Compiled classes and packages\n*.class\n*.jar\n*.war\n*.ear\n*.nar\nhs_err_pid*\nreplay_pid*\n\n# Maven\ntarget/\npom.xml.tag\npom.xml.releaseBackup\npom.xml.versionsBackup\nrelease.properties\n.mvn/timing.properties\n!.mvn/wrapper/maven-wrapper.jar\n\n# Gradle\n.gradle/\nbuild/\n!gradle/wrapper/gradle-wrapper.jar\n\n# Eclipse / NetBeans\n.classpath\n.project\n.settings/\nbin/\nnbproject/private/' },
+  Go: { label: 'Go', body: '# Binaries\n*.exe\n*.exe~\n*.dll\n*.so\n*.dylib\n\n# Test binaries and coverage\n*.test\n*.out\ncoverage.*\n\n# Workspace file (usually local)\ngo.work\ngo.work.sum\n\n# Vendored dependencies (remove this line if you commit vendor/)\n# vendor/' },
+  Rust: { label: 'Rust / Cargo', body: '# Build output\ntarget/\n\n# Backup files from rustfmt\n**/*.rs.bk\n\n# Debug info on Windows\n*.pdb\n\n# Libraries usually do not commit Cargo.lock; applications should.\n# Cargo.lock' },
+  Docker: { label: 'Docker', body: '# Local overrides and secrets\ndocker-compose.override.yml\ncompose.override.yaml\n.env\n\n# Data volumes mounted into the project folder\n.docker-data/' },
+  Terraform: { label: 'Terraform', body: '# Local state and provider plugins\n.terraform/\n*.tfstate\n*.tfstate.*\ncrash.log\ncrash.*.log\n\n# Variable files often contain secrets\n*.tfvars\n*.tfvars.json\n\n# Local overrides\noverride.tf\noverride.tf.json\n*_override.tf\n*_override.tf.json\n.terraformrc\nterraform.rc\n\n# Commit .terraform.lock.hcl: it pins provider versions' },
+  PHP: { label: 'PHP / Composer', body: '# Composer\nvendor/\ncomposer.phar\n\n# Framework caches (Laravel / Symfony)\n.phpunit.result.cache\n.php-cs-fixer.cache\nstorage/*.key\nvar/cache/\nvar/log/\n\n# Environment files\n.env\n.env.*\n!.env.example' },
+  Ruby: { label: 'Ruby / Rails', body: '# Bundler\n.bundle/\nvendor/bundle/\n\n# Rails\nlog/*\ntmp/*\n!log/.keep\n!tmp/.keep\nstorage/*\n!storage/.keep\npublic/assets/\n/config/master.key\n\n# Gems\n*.gem\ncoverage/' },
+  DotNet: { label: '.NET / C#', body: '# Build output\n[Bb]in/\n[Oo]bj/\n[Dd]ebug/\n[Rr]elease/\nx64/\nx86/\n[Ll]og/\n\n# Visual Studio\n.vs/\n*.user\n*.suo\n*.userprefs\n\n# NuGet\n*.nupkg\n*.snupkg\npackages/\n!**/packages/build/\n\n# Test results\nTestResults/\n[Tt]est[Rr]esult*/' },
+  Android: { label: 'Android', body: '# Gradle and build output\n.gradle/\nbuild/\n/captures\n.externalNativeBuild/\n.cxx/\n\n# Local configuration (SDK path)\nlocal.properties\n\n# Android Studio\n*.iml\n.idea/\n\n# Signing keys: never commit these\n*.jks\n*.keystore\n\n# Generated files\n*.apk\n*.aab\n*.ap_\n*.dex\noutput-metadata.json' },
+  macOS: { label: 'macOS', body: '# macOS Finder and system files\n.DS_Store\n.AppleDouble\n.LSOverride\n._*\n.Spotlight-V100\n.Trashes\n.fseventsd\n.DocumentRevisions-V100\n.TemporaryItems\n.VolumeIcon.icns' },
+  Windows: { label: 'Windows', body: '# Windows thumbnail and folder files\nThumbs.db\nThumbs.db:encryptable\nehthumbs.db\nehthumbs_vista.db\ndesktop.ini\n$RECYCLE.BIN/\n\n# Windows shortcuts\n*.lnk\n\n# Installer caches\n*.stackdump' },
+  Linux: { label: 'Linux', body: '# Editor backup and temporary files\n*~\n.fuse_hidden*\n.directory\n.Trash-*\n.nfs*' },
+  VSCode: { label: 'VS Code', body: '# VS Code: ignore personal settings but keep shared ones\n.vscode/*\n!.vscode/settings.json\n!.vscode/tasks.json\n!.vscode/launch.json\n!.vscode/extensions.json\n!.vscode/*.code-snippets\n.history/\n*.vsix' },
+  JetBrains: { label: 'JetBrains (IntelliJ, PyCharm, WebStorm…)', body: '# JetBrains IDEs\n.idea/\n*.iml\n*.ipr\n*.iws\nout/\n.idea_modules/\n\n# If you share run configurations, use these instead of ignoring .idea/ entirely:\n# .idea/workspace.xml\n# .idea/tasks.xml\n# .idea/usage.statistics.xml' },
+  Vim: { label: 'Vim / Emacs', body: '# Vim swap, undo and session files\n[._]*.s[a-v][a-z]\n!*.svg\n[._]*.sw[a-p]\n[._]s[a-rt-v][a-z]\n[._]ss[a-gi-z]\n[._]sw[a-p]\nSession.vim\nSessionx.vim\n.netrwhist\ntags\n[._]*.un~\n\n# Emacs\n*~\n\\#*\\#\n.\\#*' },
+  Secrets: { label: 'Secrets & keys (recommended)', body: '# Private keys and credentials: never commit these\n*.pem\n*.key\n*.p12\n*.pfx\nid_rsa\nid_ed25519\n*.secret\nsecrets.*\n!secrets.example.*\n.env\n.env.*\n!.env.example' }
+};
+
+// Combine templates and drop duplicate patterns, unless a "!" rule in between could make the order matter.
+T.gitignoreCombine = function (names, extra) {
+  var out = [], seen = {};
+  names.forEach(function (n) {
+    var t = T.GITIGNORE[n]; if (!t) return;
+    out.push('### ' + t.label + ' ###');
+    t.body.split(/\n\s*\n/).forEach(function (block) {
+      var lines = block.split('\n'), kept = [], pats = 0, dropped = 0;
+      lines.forEach(function (line) {
+        var pat = line.trim();
+        if (!pat || pat.charAt(0) === '#') { kept.push(line); return; }
+        pats++;
+        if (pat.charAt(0) === '!') { Object.keys(seen).forEach(function (k) { seen[k].push(pat.slice(1)); }); kept.push(line); return; }
+        if (seen[pat] && !seen[pat].some(function (neg) { return T.gitignoreCheck(pat, neg).ignored || T.gitignoreCheck(neg, pat.replace(/\/$/, '')).ignored; })) { dropped++; return; }
+        seen[pat] = []; kept.push(line);
+      });
+      if (pats && dropped === pats) return;
+      out.push(kept.join('\n'), '');
+    });
+  });
+  if (extra && extra.trim()) out.push('### Custom ###', extra.trim(), '');
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
+};
+
+// Compile one gitignore pattern into a matcher, following git's wildmatch rules.
+function giGlobToRe(p) {
+  var re = '', i = 0, n = p.length;
+  while (i < n) {
+    var c = p[i];
+    if (c === '*') {
+      if (p[i + 1] === '*') {
+        var atStart = i === 0 || p[i - 1] === '/', j = i; while (p[j] === '*') j++;
+        var atEnd = j === n || p[j] === '/';
+        if (atStart && atEnd) {
+          if (j === n) { re += i === 0 ? '.*' : '.*'; i = j; continue; }          // "**" at end: everything inside
+          re += '(?:.*/)?'; i = j + 1; continue;                                   // "**/": zero or more directories
+        }
+        re += '[^/]*'; i = j; continue;
+      }
+      re += '[^/]*'; i++; continue;
+    }
+    if (c === '?') { re += '[^/]'; i++; continue; }
+    if (c === '[') {
+      var k = i + 1, cls = '';
+      if (p[k] === '!' || p[k] === '^') { cls = '^'; k++; }
+      if (p[k] === ']') { cls += '\\]'; k++; }
+      while (k < n && p[k] !== ']') {
+        if (p[k] === '\\' && k + 1 < n) { cls += '\\' + p[k + 1]; k += 2; continue; }
+        if (p[k] === '[' && p[k + 1] === ':') { var e = p.indexOf(':]', k + 2); if (e > 0) { var nm = p.slice(k + 2, e); cls += ({ alpha: 'a-zA-Z', digit: '0-9', alnum: 'a-zA-Z0-9', upper: 'A-Z', lower: 'a-z', space: '\\s', xdigit: '0-9a-fA-F', punct: '!-\\/:-@\\[-`{-~' })[nm] || ''; k = e + 2; continue; } }
+        cls += /[\]\\^]/.test(p[k]) ? '\\' + p[k] : p[k]; k++;
+      }
+      if (k >= n) { re += '\\['; i++; continue; }  // unterminated class: literal "["
+      re += cls.charAt(0) === '^' ? '(?![/])[' + cls + ']' : '[' + cls + ']'; i = k + 1; continue;
+    }
+    if (c === '\\' && i + 1 < n) { re += p[i + 1].replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); i += 2; continue; }
+    re += c.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); i++;
+  }
+  return re;
+}
+
+T.gitignoreParse = function (text) {
+  var rules = [];
+  String(text).replace(/\r\n?/g, '\n').split('\n').forEach(function (raw, idx) {
+    var line = raw;
+    // trailing spaces are ignored unless escaped with a backslash
+    line = line.replace(/((?:\\\\)*)(\\?) +$/, function (m, bs, esc1) { return bs + (esc1 ? ' ' : ''); });
+    if (!line || line.charAt(0) === '#') return;
+    var neg = false;
+    if (line.charAt(0) === '!') { neg = true; line = line.slice(1); }
+    else if (line.slice(0, 2) === '\\!' || line.slice(0, 2) === '\\#') line = line.slice(1);
+    if (!line) return;
+    var dirOnly = false;
+    if (/[^\\]\/$|^\/$/.test(line)) { dirOnly = true; line = line.replace(/\/+$/, ''); }
+    if (!line) return;
+    var anchored = line.indexOf('/') >= 0;
+    if (line.charAt(0) === '/') line = line.slice(1);
+    var re = giGlobToRe(line);
+    rules.push({ line: idx + 1, text: raw.replace(/\s+$/, ''), neg: neg, dirOnly: dirOnly, anchored: anchored, re: new RegExp('^' + re + '$') });
+  });
+  return rules;
+};
+
+function giMatchOne(rules, path, isDir) {
+  var base = path.slice(path.lastIndexOf('/') + 1), hit = null;
+  for (var i = rules.length - 1; i >= 0; i--) {
+    var r = rules[i];
+    if (r.dirOnly && !isDir) continue;
+    if (r.anchored ? r.re.test(path) : r.re.test(base)) { hit = r; break; }
+  }
+  return hit;
+}
+
+// Is a path ignored? Mirrors git: a path inside an ignored directory is ignored, and cannot be re-included by a later "!" rule.
+T.gitignoreCheck = function (rules, path) {
+  if (typeof rules === 'string') rules = T.gitignoreParse(rules);
+  var p = String(path).replace(/^\s+|[\r\n]+$/g, '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  var isDir = /\/$/.test(p); p = p.replace(/\/+$/, '').replace(/\/{2,}/g, '/');
+  if (!p) return { ignored: false, rule: null, path: p };
+  var parts = p.split('/');
+  for (var d = 1; d < parts.length; d++) {
+    var dir = parts.slice(0, d).join('/'), h = giMatchOne(rules, dir, true);
+    if (h && !h.neg) return { ignored: true, rule: h, path: p, via: dir + '/', isDir: isDir };
+  }
+  var hit = giMatchOne(rules, p, isDir);
+  return { ignored: !!(hit && !hit.neg), rule: hit, path: p, isDir: isDir };
+};
+/* ---------------- CSV <-> JSON ---------------- */
+// RFC 4180 parser: quoted fields, "" escapes, delimiters and line breaks inside quotes, CRLF/LF/CR line endings.
+T.csvParse = function (text, delim, limit) {
+  var s = String(text), rows = [], row = [], f = '', i = 0, n = s.length, q = false, quotedField = false, warn = [];
+  if (s.charCodeAt(0) === 0xfeff) i = 1;
+  delim = delim || ',';
+  function endField() { row.push(f); f = ''; quotedField = false; }
+  function endRow() { endField(); rows.push(row); row = []; }
+  while (i < n) {
+    var c = s[i];
+    if (q) {
+      if (c === '"') { if (s[i + 1] === '"') { f += '"'; i += 2; continue; } q = false; i++; continue; }
+      f += c; i++; continue;
+    }
+    if (c === '"' && f === '' && !quotedField) { q = true; quotedField = true; i++; continue; }
+    if (c === '"' && quotedField) { f += c; i++; if (warn.length < 5) warn.push('Stray quote after a closing quote on row ' + (rows.length + 1)); continue; }
+    if (c === delim) { endField(); i++; continue; }
+    if (c === '\r' || c === '\n') { endRow(); i += c === '\r' && s[i + 1] === '\n' ? 2 : 1; if (limit && rows.length >= limit) return { rows: rows, warnings: warn, truncated: true }; continue; }
+    f += c; i++;
+  }
+  if (q) warn.push('Unclosed quote: a field starting with " never ends (row ' + (rows.length + 1) + ')');
+  if (f !== '' || row.length || quotedField) endRow();
+  return { rows: rows, warnings: warn };
+};
+
+T.csvDetectDelimiter = function (text) {
+  var sample = String(text).slice(0, 20000), best = ',', bestScore = -1;
+  [',', ';', '\t', '|'].forEach(function (d) {
+    var rows = T.csvParse(sample, d, 30).rows.filter(function (r) { return !(r.length === 1 && r[0] === ''); });
+    if (rows.length > 1 && sample.length >= 20000) rows.pop(); // last row may be cut off
+    if (!rows.length) return;
+    var counts = rows.map(function (r) { return r.length; }), first = counts[0];
+    if (first < 2) return;
+    var same = counts.filter(function (c) { return c === first; }).length / counts.length;
+    var score = same * 100 + Math.min(first, 50);
+    if (score > bestScore) { bestScore = score; best = d; }
+  });
+  return best;
+};
+
+function csvInfer(v) {
+  if (v === '') return null;
+  if (/^-?(0|[1-9]\d{0,14})(\.\d+)?([eE][+-]?\d+)?$/.test(v)) { var x = Number(v); if (isFinite(x)) return x; }
+  if (v === 'true' || v === 'TRUE' || v === 'True') return true;
+  if (v === 'false' || v === 'FALSE' || v === 'False') return false;
+  if (v === 'null' || v === 'NULL') return null;
+  return v;
+}
+
+T.csvToJson = function (text, opts) {
+  opts = opts || {};
+  var d = !opts.delimiter || opts.delimiter === 'auto' ? T.csvDetectDelimiter(text) : opts.delimiter;
+  var p = T.csvParse(text, d), rows = p.rows;
+  if (opts.skipEmpty !== false) rows = rows.filter(function (r) { return !(r.length === 1 && r[0] === ''); });
+  var conv = opts.infer ? csvInfer : function (v) { return v; };
+  var warnings = p.warnings.slice(), data;
+  if (opts.header !== false && rows.length) {
+    var used = {}, keys = rows[0].map(function (h, k) {
+      var key = h.trim() || 'column_' + (k + 1), base = key, m = 2;
+      while (used[key]) key = base + '_' + m++;
+      if (key !== base) warnings.push('Duplicate column name "' + base + '" renamed to "' + key + '"');
+      used[key] = 1; return key;
+    });
+    var ragged = 0;
+    data = rows.slice(1).map(function (r) {
+      var o = {};
+      if (r.length !== keys.length) ragged++;
+      for (var k = 0; k < Math.max(keys.length, r.length); k++) {
+        var key = k < keys.length ? keys[k] : 'column_' + (k + 1);
+        o[key] = k < r.length ? conv(r[k]) : (opts.infer ? null : '');
+      }
+      return o;
+    });
+    if (ragged) warnings.push(ragged + ' row' + (ragged > 1 ? 's have' : ' has') + ' a different number of fields than the header (' + keys.length + ')');
+  } else data = rows.map(function (r) { return r.map(conv); });
+  return { data: data, delimiter: d, rows: rows.length, warnings: warnings };
+};
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+function csvQuote(s, d, always) {
+  return always || s.indexOf(d) >= 0 || /["\r\n]/.test(s) || /^\s|\s$/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+T.jsonToCsv = function (value, opts) {
+  opts = opts || {};
+  var d = opts.delimiter && opts.delimiter !== 'auto' ? opts.delimiter : ',', eol = opts.crlf ? '\r\n' : '\n', lines = [];
+  if (typeof value === 'string') value = JSON.parse(value);
+  if (value && !Array.isArray(value) && typeof value === 'object') {
+    var ks0 = Object.keys(value);
+    // {"items": [...]} wrapper: use the first array property
+    var arrKey = ks0.filter(function (k) { return Array.isArray(value[k]) && value[k].length && typeof value[k][0] === 'object'; })[0];
+    value = arrKey && ks0.length <= 3 ? value[arrKey] : [value];
+  }
+  if (!Array.isArray(value)) throw new Error('Expected a JSON array (of objects or of arrays).');
+  var flat = opts.flatten !== false;
+  function flatten(o, pre, out) {
+    Object.keys(o).forEach(function (k) {
+      var v = o[k], key = pre ? pre + '.' + k : k;
+      if (flat && v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length) flatten(v, key, out); else out[key] = v;
+    });
+    return out;
+  }
+  if (value.every(function (r) { return Array.isArray(r); })) {
+    value.forEach(function (r) { lines.push(r.map(function (c) { return csvQuote(csvCell(c), d, opts.quoteAll); }).join(d)); });
+    return lines.join(eol) + (lines.length ? eol : '');
+  }
+  var rows = value.map(function (r) { return r && typeof r === 'object' && !Array.isArray(r) ? flatten(r, '', {}) : { value: r }; });
+  var keys = [], seen = {};
+  rows.forEach(function (r) { Object.keys(r).forEach(function (k) { if (!seen[k]) { seen[k] = 1; keys.push(k); } }); });
+  if (opts.header !== false) lines.push(keys.map(function (k) { return csvQuote(k, d, opts.quoteAll); }).join(d));
+  rows.forEach(function (r) { lines.push(keys.map(function (k) { return csvQuote(csvCell(r[k]), d, opts.quoteAll); }).join(d)); });
+  return lines.join(eol) + eol;
+};
+/* ---------------- Subnet / CIDR calculator ---------------- */
+T.ip4Parse = function (s) {
+  s = String(s).trim();
+  var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) throw new Error('"' + s + '" is not a valid IPv4 address (expected four numbers like 192.168.1.10).');
+  var n = 0;
+  for (var k = 1; k <= 4; k++) {
+    if (m[k].length > 1 && m[k][0] === '0') throw new Error('"' + s + '": leading zeros are ambiguous (some tools read them as octal). Write ' + m.slice(1).map(function (x) { return +x; }).join('.') + '.');
+    var v = +m[k]; if (v > 255) throw new Error('"' + s + '": each part must be 0-255, got ' + v + '.');
+    n = n * 256 + v;
+  }
+  return n;
+};
+T.ip4Str = function (n) { return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'); };
+function ip4Mask(p) { return p === 0 ? 0 : (0xffffffff << (32 - p)) >>> 0; }
+function ip4Bin(n) { var b = ('0'.repeat(32) + n.toString(2)).slice(-32); return b.slice(0, 8) + '.' + b.slice(8, 16) + '.' + b.slice(16, 24) + '.' + b.slice(24); }
+T.ip4MaskToPrefix = function (s) {
+  var n = T.ip4Parse(s), p = 0;
+  while (p < 32 && (n & (0x80000000 >>> p))) p++;
+  if (ip4Mask(p) !== n) {
+    var inv = (~n) >>> 0, q = 0; while (q < 32 && (inv & (0x80000000 >>> q))) q++;
+    if (ip4Mask(q) === inv) return { prefix: q, wildcard: true };
+    throw new Error(s + ' is not a valid netmask (the 1 bits must be contiguous, e.g. 255.255.255.0).');
+  }
+  return { prefix: p };
+};
+function ip4Type(n) {
+  var R = [['0.0.0.0', 8, 'This network (0.0.0.0/8)'], ['10.0.0.0', 8, 'Private (RFC 1918)'], ['100.64.0.0', 10, 'Carrier-grade NAT / shared (RFC 6598)'], ['127.0.0.0', 8, 'Loopback'],
+    ['169.254.0.0', 16, 'Link-local (APIPA)'], ['172.16.0.0', 12, 'Private (RFC 1918)'], ['192.0.0.0', 24, 'IETF protocol assignments'], ['192.0.2.0', 24, 'Documentation (TEST-NET-1)'],
+    ['192.88.99.0', 24, 'Reserved (6to4 relay)'], ['192.168.0.0', 16, 'Private (RFC 1918)'], ['198.18.0.0', 15, 'Benchmarking (RFC 2544)'], ['198.51.100.0', 24, 'Documentation (TEST-NET-2)'],
+    ['203.0.113.0', 24, 'Documentation (TEST-NET-3)'], ['224.0.0.0', 4, 'Multicast'], ['255.255.255.255', 32, 'Limited broadcast'], ['240.0.0.0', 4, 'Reserved (class E)']];
+  for (var k = 0; k < R.length; k++) { var b = T.ip4Parse(R[k][0]), m = ip4Mask(R[k][1]); if (((n & m) >>> 0) === b) return R[k][2]; }
+  return 'Public (globally routable)';
+}
+// Accepts "10.0.0.5/24", "10.0.0.5 255.255.255.0", "10.0.0.5/255.255.255.0" or a bare address (/32).
+T.cidrParse = function (s) {
+  s = String(s).trim();
+  var m = /^([\d.]+)\s*(?:\/\s*(\d{1,2})|[\/\s]\s*([\d.]+))?$/.exec(s);
+  if (!m) throw new Error('Enter an IPv4 network like 192.168.1.0/24 or 10.0.0.5 255.255.255.0.');
+  var ip = T.ip4Parse(m[1]), p = 32;
+  if (m[2] !== undefined) { p = +m[2]; if (p > 32) throw new Error('The prefix length must be between 0 and 32.'); }
+  else if (m[3] !== undefined) p = T.ip4MaskToPrefix(m[3]).prefix;
+  return { ip: ip, prefix: p };
+};
+T.cidrInfo = function (s) {
+  var c = typeof s === 'string' ? T.cidrParse(s) : s, p = c.prefix, mask = ip4Mask(p), net = (c.ip & mask) >>> 0, bc = (net | (~mask >>> 0)) >>> 0;
+  var total = Math.pow(2, 32 - p), first, last, usable;
+  if (p === 32) { first = last = net; usable = 1; }
+  else if (p === 31) { first = net; last = bc; usable = 2; }
+  else { first = net + 1; last = bc - 1; usable = total - 2; }
+  var o1 = net >>> 24;
+  return {
+    input: T.ip4Str(c.ip) + '/' + p, prefix: p, address: T.ip4Str(c.ip), network: T.ip4Str(net), broadcast: p >= 31 ? null : T.ip4Str(bc), netmask: T.ip4Str(mask),
+    wildcard: T.ip4Str(~mask >>> 0), first: T.ip4Str(first), last: T.ip4Str(last), total: total, usable: usable, cidr: T.ip4Str(net) + '/' + p,
+    hostBitsSet: c.ip !== net, type: ip4Type(c.ip), cls: o1 < 128 ? 'A' : o1 < 192 ? 'B' : o1 < 224 ? 'C' : o1 < 240 ? 'D (multicast)' : 'E (reserved)',
+    binMask: ip4Bin(mask), binAddr: ip4Bin(c.ip), hex: '0x' + ('00000000' + c.ip.toString(16)).slice(-8), int: c.ip, netInt: net, bcInt: bc,
+    ptr: p % 8 === 0 && p > 0 ? T.ip4Str(net).split('.').slice(0, p / 8).reverse().join('.') + '.in-addr.arpa' : null
+  };
+};
+T.cidrContains = function (cidr, ip) {
+  var c = T.cidrInfo(cidr), n = typeof ip === 'number' ? ip : T.ip4Parse(ip);
+  return n >= c.netInt && n <= c.bcInt;
+};
+T.cidrSplit = function (cidr, newPrefix, max) {
+  var c = T.cidrInfo(cidr), np = +newPrefix;
+  if (!(np >= c.prefix && np <= 32)) throw new Error('The new prefix must be between /' + c.prefix + ' and /32.');
+  var count = Math.pow(2, np - c.prefix), size = Math.pow(2, 32 - np), out = [];
+  for (var k = 0; k < count && k < (max || 256); k++) out.push(T.cidrInfo({ ip: c.netInt + k * size, prefix: np }));
+  return { count: count, size: size, subnets: out };
+};
+// Do two networks overlap? Useful for VPN / Docker / Kubernetes address conflicts.
+T.cidrOverlap = function (a, b) { var x = T.cidrInfo(a), y = T.cidrInfo(b); return x.netInt <= y.bcInt && y.netInt <= x.bcInt; };
+
+/* IPv6 */
+T.ip6Parse = function (s) {
+  s = String(s).trim().replace(/^\[|\]$/g, '');
+  var zone = '', zi = s.indexOf('%'); if (zi >= 0) { zone = s.slice(zi); s = s.slice(0, zi); }
+  if (!/^[0-9a-fA-F:.]+$/.test(s) || s.indexOf(':') < 0) throw new Error('"' + s + '" is not a valid IPv6 address.');
+  var v4 = null, m = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(s);
+  if (m) { v4 = T.ip4Parse(m[2]); s = m[1] + (v4 >>> 16).toString(16) + ':' + (v4 & 0xffff).toString(16); }
+  var dbl = s.split('::');
+  if (dbl.length > 2) throw new Error('"::" may appear only once in an IPv6 address.');
+  function groups(x) { return x === '' ? [] : x.split(':'); }
+  var head = groups(dbl[0]), tail = dbl.length === 2 ? groups(dbl[1]) : [];
+  var all = head.concat(tail);
+  if (all.some(function (g) { return !/^[0-9a-fA-F]{1,4}$/.test(g); })) throw new Error('Each IPv6 group must be 1-4 hex digits.');
+  var missing = 8 - all.length;
+  if (dbl.length === 2 ? missing < 1 : missing !== 0) throw new Error(dbl.length === 2 ? 'Too many groups for "::" to stand for.' : 'An IPv6 address needs 8 groups (or "::" for a run of zeros).');
+  var full = head.concat(new Array(dbl.length === 2 ? missing : 0).fill('0'), tail), n = BigInt(0);
+  full.forEach(function (g) { n = (n << BigInt(16)) | BigInt(parseInt(g, 16)); });
+  return { n: n, zone: zone };
+};
+function ip6Groups(n) { var g = []; for (var k = 7; k >= 0; k--) g.push(Number((n >> BigInt(16 * k)) & BigInt(0xffff))); return g; }
+T.ip6Expand = function (n) { return ip6Groups(n).map(function (g) { return ('000' + g.toString(16)).slice(-4); }).join(':'); };
+T.ip6Compress = function (n) {
+  var g = ip6Groups(n), bs = -1, bl = 0;
+  for (var k = 0; k < 8;) { if (g[k] === 0) { var j = k; while (j < 8 && g[j] === 0) j++; if (j - k > bl) { bs = k; bl = j - k; } k = j; } else k++; }
+  var h = g.map(function (x) { return x.toString(16); });
+  if (bl < 2) return h.join(':');
+  return h.slice(0, bs).join(':') + '::' + h.slice(bs + bl).join(':');
+};
+function ip6Type(n) {
+  var R = [['::1', 128, 'Loopback'], ['::', 128, 'Unspecified'], ['::ffff:0:0', 96, 'IPv4-mapped'], ['64:ff9b::', 96, 'IPv4/IPv6 translation (NAT64)'], ['2001:db8::', 32, 'Documentation'],
+    ['2001::', 32, 'Teredo'], ['2002::', 16, '6to4'], ['fe80::', 10, 'Link-local'], ['fc00::', 7, 'Unique local (ULA, private)'], ['ff00::', 8, 'Multicast'], ['2000::', 3, 'Global unicast']];
+  for (var k = 0; k < R.length; k++) { var b = T.ip6Parse(R[k][0]).n, sh = BigInt(128 - R[k][1]); if ((n >> sh) === (b >> sh)) return R[k][2]; }
+  return 'Reserved';
+}
+T.ip6Info = function (s) {
+  s = String(s).trim();
+  var m = /^(.*?)(?:\/(\d{1,3}))?$/.exec(s), a = T.ip6Parse(m[1]), p = m[2] === undefined ? 128 : +m[2];
+  if (p > 128) throw new Error('The IPv6 prefix length must be between 0 and 128.');
+  var ALL = (BigInt(1) << BigInt(128)) - BigInt(1), host = p === 128 ? BigInt(0) : (BigInt(1) << BigInt(128 - p)) - BigInt(1), net = a.n & (ALL ^ host), last = net | host;
+  var total = BigInt(1) << BigInt(128 - p);
+  return { address: T.ip6Compress(a.n) + a.zone, expanded: T.ip6Expand(a.n), prefix: p, network: T.ip6Compress(net) + '/' + p, first: T.ip6Compress(net), last: T.ip6Compress(last),
+    firstExpanded: T.ip6Expand(net), lastExpanded: T.ip6Expand(last), total: total.toString(), totalPow: '2^' + (128 - p), type: ip6Type(a.n), n: a.n,
+    hostBitsSet: (a.n & host) !== BigInt(0),
+    ptr: T.ip6Expand(a.n).replace(/:/g, '').split('').reverse().join('.') + '.ip6.arpa' };
+};
+/* ---------------- docker run -> compose ---------------- */
+// value-taking flags: flag -> compose handler name
+var DR_VAL = { '-p': 'ports', '--publish': 'ports', '-v': 'volumes', '--volume': 'volumes', '--mount': 'mount', '-e': 'env', '--env': 'env', '--env-file': 'env_file',
+  '--name': 'name', '--restart': 'restart', '--network': 'network', '--net': 'network', '--network-alias': 'alias', '--net-alias': 'alias', '-w': 'working_dir',
+  '--workdir': 'working_dir', '-u': 'user', '--user': 'user', '--entrypoint': 'entrypoint', '-h': 'hostname', '--hostname': 'hostname', '--add-host': 'extra_hosts',
+  '--dns': 'dns', '--dns-search': 'dns_search', '-l': 'labels', '--label': 'labels', '--cpus': 'cpus', '-m': 'mem_limit', '--memory': 'mem_limit',
+  '--memory-reservation': 'mem_reservation', '--memory-swap': 'memswap_limit', '--shm-size': 'shm_size', '--cap-add': 'cap_add', '--cap-drop': 'cap_drop',
+  '--device': 'devices', '--log-driver': 'log_driver', '--log-opt': 'log_opt', '--ulimit': 'ulimits', '--sysctl': 'sysctls', '--tmpfs': 'tmpfs', '--platform': 'platform',
+  '--pull': 'pull_policy', '--health-cmd': 'hc_test', '--health-interval': 'hc_interval', '--health-retries': 'hc_retries', '--health-timeout': 'hc_timeout',
+  '--health-start-period': 'hc_start_period', '--gpus': 'gpus', '--ipc': 'ipc', '--pid': 'pid', '--stop-signal': 'stop_signal', '--stop-timeout': 'stop_grace_period',
+  '--security-opt': 'security_opt', '--expose': 'expose', '--link': 'links', '--group-add': 'group_add', '--runtime': 'runtime', '--mac-address': 'mac_address',
+  '--ip': 'ip', '--ip6': 'ip6', '--userns': 'userns_mode', '--uts': 'uts', '--cgroup-parent': 'cgroup_parent', '--cpu-shares': 'cpu_shares', '-c': 'cpu_shares',
+  '--cpuset-cpus': 'cpuset', '--pids-limit': 'pids_limit', '--oom-score-adj': 'oom_score_adj', '--volumes-from': 'volumes_from', '--label-file': 'label_file',
+  '--attach': 'ignore', '-a': 'ignore', '--cidfile': 'ignore', '--detach-keys': 'ignore', '--storage-opt': 'storage_opt', '--device-cgroup-rule': 'device_cgroup_rules',
+  '--isolation': 'isolation', '--domainname': 'domainname', '--cgroupns': 'cgroup', '--blkio-weight': 'blkio', '--cpu-period': 'cpu_period', '--cpu-quota': 'cpu_quota' };
+var DR_BOOL = { '-d': 'detach', '--detach': 'detach', '-i': 'stdin_open', '--interactive': 'stdin_open', '-t': 'tty', '--tty': 'tty', '--rm': 'rm', '--privileged': 'privileged',
+  '--init': 'init', '--read-only': 'read_only', '-P': 'publish_all', '--publish-all': 'publish_all', '--no-healthcheck': 'no_healthcheck', '-q': 'ignore', '--quiet': 'ignore',
+  '--sig-proxy': 'ignore', '--oom-kill-disable': 'oom_kill_disable' };
+
+function yq(s) {
+  s = String(s);
+  if (s === '') return '""';
+  if (/^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s) || /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) || /^0[xo][0-9a-f]+$/i.test(s) || /^[\d:]+$/.test(s)) return JSON.stringify(s);
+  if (/^[A-Za-z0-9_.\/~$][A-Za-z0-9_.\/~$@%+=:-]*$/.test(s) && !/:$/.test(s)) return s;
+  return JSON.stringify(s);
+}
+T.yamlQuote = yq;
+function yflow(arr) { return '[' + arr.map(function (x) { return JSON.stringify(x); }).join(', ') + ']'; }
+function drServiceName(name, image) {
+  var s = name || (image || 'app').replace(/@.*$/, '').split('/').pop().replace(/:.*$/, '');
+  s = s.toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^[^a-z0-9]+|[-.]+$/g, '');
+  return s || 'app';
+}
+function drDur(v) { return /^\d+$/.test(v) ? v + 's' : v; }
+
+T.dockerRunParse = function (text) {
+  var words = T.shellSplit(String(text).trim().replace(/^\$\s+/, '')), cmds = [], cur = null, warnings = [];
+  for (var k = 0; k < words.length; k++) {
+    var w = words[k];
+    if (typeof w !== 'string') { if (cur) { cmds.push(cur); cur = null; } continue; }
+    if (cur) { cur.push(w); continue; }
+    if (/(^|\/)(docker|podman)(\.exe)?$/.test(w) || w === 'sudo') {
+      var j = k + (w === 'sudo' ? 1 : 0);
+      if (w === 'sudo' && !/docker|podman/.test(words[j] || '')) continue;
+      var a1 = words[j + 1], a2 = words[j + 2];
+      if (a1 === 'run') { cur = []; k = j + 1; } else if (a1 === 'container' && (a2 === 'run' || a2 === 'create')) { cur = []; k = j + 2; } else if (a1 === 'create') { cur = []; k = j + 1; }
+    }
+  }
+  if (cur) cmds.push(cur);
+  if (!cmds.length) throw new Error('No "docker run" command found. Paste a command like: docker run -d -p 8080:80 nginx');
+  var services = cmds.map(function (args) { return drParseOne(args, warnings); });
+  return { services: services, warnings: warnings };
+};
+
+function drParseOne(args, warnings) {
+  var s = { opts: {}, lists: {}, image: null, command: [] };
+  function addList(key, v) { (s.lists[key] = s.lists[key] || []).push(v); }
+  for (var i = 0; i < args.length; i++) {
+    var a = args[i], flag = null, val = null;
+    if (a === '--') { i++; a = args[i]; if (a === undefined) break; }
+    else if (/^--[a-z]/.test(a)) {
+      var eq = a.indexOf('=');
+      flag = eq > 0 ? a.slice(0, eq) : a;
+      if (DR_VAL[flag]) { val = eq > 0 ? a.slice(eq + 1) : args[++i]; if (val === undefined) throw new Error(flag + ' needs a value.'); }
+      else if (DR_BOOL[flag]) { val = eq > 0 ? a.slice(eq + 1) : 'true'; if (/^false$/i.test(val)) continue; }
+      else { warnings.push('Unknown option ' + flag + ' was skipped.'); if (eq < 0 && args[i + 1] && args[i + 1].charAt(0) !== '-' && false) i++; continue; }
+      drApply(s, flag, val, warnings, addList); continue;
+    } else if (/^-[A-Za-z]/.test(a)) {
+      for (var j = 1; j < a.length; j++) {
+        var f = '-' + a[j];
+        if (DR_VAL[f]) { val = a.slice(j + 1).replace(/^=/, '') || args[++i]; if (val === undefined) throw new Error(f + ' needs a value.'); drApply(s, f, val, warnings, addList); break; }
+        if (DR_BOOL[f]) { drApply(s, f, 'true', warnings, addList); continue; }
+        warnings.push('Unknown option ' + f + ' was skipped.');
+      }
+      continue;
+    }
+    s.image = a; s.command = args.slice(i + 1); break;
+  }
+  if (!s.image) throw new Error('No image name found after the options.');
+  return s;
+}
+
+function drApply(s, flag, v, warnings, addList) {
+  var h = DR_VAL[flag] || DR_BOOL[flag], o = s.opts;
+  switch (h) {
+    case 'ports': case 'volumes': case 'env': case 'env_file': case 'extra_hosts': case 'dns': case 'dns_search': case 'labels': case 'cap_add': case 'cap_drop': case 'devices':
+    case 'log_opt': case 'ulimits': case 'sysctls': case 'tmpfs': case 'security_opt': case 'expose': case 'links': case 'group_add': case 'alias': case 'mount':
+    case 'volumes_from': case 'storage_opt': case 'device_cgroup_rules': case 'label_file': case 'network':
+      addList(h, v); break;
+    case 'ignore': break;
+    default: o[h] = v;
+  }
+}
+
+T.dockerRunToCompose = function (text) {
+  var p = T.dockerRunParse(text), W = p.warnings.slice(), L = ['services:'], topNet = {}, topVol = {}, names = {};
+  var dollar = false;
+  function esc$(x) { if (/\$/.test(x)) { dollar = true; } return x; }
+  p.services.forEach(function (s) {
+    var o = s.opts, li = s.lists, name = drServiceName(o.name, s.image), base = name, n = 2;
+    while (names[name]) name = base + '-' + n++;
+    names[name] = 1;
+    var S = [];
+    function kv(k, v) { S.push('    ' + k + ': ' + v); }
+    function list(k, arr, q) { if (!arr || !arr.length) return; S.push('    ' + k + ':'); arr.forEach(function (x) { S.push('      - ' + (q ? JSON.stringify(x) : yq(x))); }); }
+    kv('image', yq(s.image));
+    if (o.name) kv('container_name', yq(o.name));
+    if (o.platform) kv('platform', yq(o.platform));
+    if (o.pull_policy) kv('pull_policy', yq(o.pull_policy === 'missing' ? 'missing' : o.pull_policy));
+    if (o.restart) kv('restart', yq(o.restart));
+    if (o.entrypoint !== undefined) kv('entrypoint', o.entrypoint === '' ? '[""]' : yflow([o.entrypoint]));
+    if (s.command.length) kv('command', yflow(s.command.map(function (c) { return /\$/.test(c) ? (dollar = true, c.replace(/\$/g, '$$$$')) : c; })));
+    if (o.working_dir) kv('working_dir', yq(o.working_dir));
+    if (o.user) kv('user', JSON.stringify(o.user));
+    if (o.hostname) kv('hostname', yq(o.hostname));
+    if (o.domainname) kv('domainname', yq(o.domainname));
+    if (li.ports) list('ports', li.ports, true);
+    if (li.expose) list('expose', li.expose, true);
+    // volumes (short syntax) and --mount (long syntax)
+    var vols = (li.volumes || []).map(function (v) {
+      var parts = v.split(':'), src = parts[0];
+      if (/^[A-Za-z]$/.test(src) && parts.length > 2) { src = parts[0] + ':' + parts[1]; parts = [src].concat(parts.slice(2)); } // Windows C:\path
+      if (parts.length === 1) return { s: v, note: 'anonymous' };
+      var src2 = src.replace(/^(\$\(pwd\)|\$\{?PWD\}?|`pwd`|%cd%|\$\{pwd\})(?=\/|\\|$)/, '.');
+      if (src2 !== src) { if (src2 === '.') src2 = '.'; parts[0] = src2; }
+      if (!/^[.\/~$\\]|^[A-Za-z]:/.test(parts[0])) topVol[parts[0]] = 1;
+      return { s: parts.join(':') };
+    });
+    var mounts = (li.mount || []).map(function (m) {
+      var kvs = {}; m.split(',').forEach(function (x) { var e = x.indexOf('='); kvs[e < 0 ? x : x.slice(0, e)] = e < 0 ? 'true' : x.slice(e + 1); });
+      return kvs;
+    });
+    if (vols.length || mounts.length) {
+      S.push('    volumes:');
+      vols.forEach(function (v) { S.push('      - ' + yq(v.s)); });
+      mounts.forEach(function (m) {
+        var type = m.type || 'volume', src = m.source || m.src, dst = m.target || m.destination || m.dst;
+        if (src && type === 'bind') src = src.replace(/^(\$\(pwd\)|\$\{?PWD\}?|`pwd`)(?=\/|$)/, '.');
+        S.push('      - type: ' + type);
+        if (src) S.push('        source: ' + yq(src));
+        if (dst) S.push('        target: ' + yq(dst));
+        if (m.readonly || m.ro) S.push('        read_only: true');
+        if (type === 'volume' && src) topVol[src] = 1;
+        if (m['bind-propagation']) S.push('        bind:', '          propagation: ' + yq(m['bind-propagation']));
+        if (m['volume-nocopy']) S.push('        volume:', '          nocopy: true');
+        if (m['tmpfs-size']) S.push('        tmpfs:', '          size: ' + yq(m['tmpfs-size']));
+      });
+    }
+    if (li.volumes_from) list('volumes_from', li.volumes_from);
+    if (li.tmpfs) list('tmpfs', li.tmpfs);
+    if (li.env) {
+      S.push('    environment:');
+      li.env.forEach(function (e) {
+        var eqi = e.indexOf('=');
+        if (eqi < 0) { S.push('      - ' + yq(e)); return; }
+        var val = e.slice(eqi + 1);
+        if (/\$/.test(val)) { dollar = true; val = val.replace(/\$/g, '$$$$'); }
+        S.push('      ' + yq(e.slice(0, eqi)) + ': ' + yq(val));
+      });
+      // the "- KEY" form and "KEY: value" form can't be mixed in one block
+      var block = S.slice(S.lastIndexOf('    environment:') + 1);
+      if (block.some(function (l) { return /^      - /.test(l); }) && block.some(function (l) { return !/^      - /.test(l); })) {
+        var start = S.lastIndexOf('    environment:') + 1;
+        S.splice(start, block.length);
+        li.env.forEach(function (e) { var eqi = e.indexOf('='); var x = eqi < 0 ? e : e.slice(0, eqi + 1) + e.slice(eqi + 1).replace(/\$/g, '$$$$'); S.push('      - ' + yq(x)); });
+      }
+    }
+    if (li.env_file) list('env_file', li.env_file);
+    // networking
+    var nets = li.network || [];
+    var mode = nets.filter(function (x) { return /^(host|none|bridge|default)$|^(container|service|ns):/.test(x); })[0];
+    var custom = nets.filter(function (x) { return x !== mode; }).map(function (x) { return x.split(',')[0].replace(/^name=/, ''); });
+    if (mode && mode !== 'bridge' && mode !== 'default') kv('network_mode', JSON.stringify(mode.replace(/^container:/, 'container:')));
+    if (mode === 'bridge') W.push('--network bridge is Docker\'s default network: Compose instead puts services on a project network named <project>_default, where they can reach each other by service name.');
+    if (custom.length) {
+      if (li.alias || o.ip || o.ip6) {
+        S.push('    networks:');
+        custom.forEach(function (nn, idx) {
+          S.push('      ' + yq(nn) + ':');
+          if (idx === 0 && li.alias) { S.push('        aliases:'); li.alias.forEach(function (a) { S.push('          - ' + yq(a)); }); }
+          if (idx === 0 && o.ip) S.push('        ipv4_address: ' + yq(o.ip));
+          if (idx === 0 && o.ip6) S.push('        ipv6_address: ' + yq(o.ip6));
+        });
+      } else list('networks', custom);
+      custom.forEach(function (nn) { topNet[nn] = 1; });
+    } else if (li.alias || o.ip) W.push('--network-alias / --ip only work on a user-defined network: add one under "networks:".');
+    if (li.links) { list('links', li.links); W.push('--link is legacy: on a Compose network every service can already reach the others by service name.'); }
+    if (li.extra_hosts) list('extra_hosts', li.extra_hosts.map(function (x) { return x.replace(/^([^:]+):/, '$1:'); }), true);
+    if (li.dns) list('dns', li.dns);
+    if (li.dns_search) list('dns_search', li.dns_search);
+    if (o.mac_address) kv('mac_address', JSON.stringify(o.mac_address));
+    if (o.stdin_open) kv('stdin_open', 'true');
+    if (o.tty) kv('tty', 'true');
+    if (o.privileged) kv('privileged', 'true');
+    if (o.init) kv('init', 'true');
+    if (o.read_only) kv('read_only', 'true');
+    if (o.ipc) kv('ipc', yq(o.ipc));
+    if (o.pid) kv('pid', yq(o.pid));
+    if (o.uts) kv('uts', yq(o.uts));
+    if (o.userns_mode) kv('userns_mode', yq(o.userns_mode));
+    if (o.cgroup) kv('cgroup', yq(o.cgroup));
+    if (o.cgroup_parent) kv('cgroup_parent', yq(o.cgroup_parent));
+    if (o.isolation) kv('isolation', yq(o.isolation));
+    if (o.runtime) kv('runtime', yq(o.runtime));
+    if (li.cap_add) list('cap_add', li.cap_add);
+    if (li.cap_drop) list('cap_drop', li.cap_drop);
+    if (li.security_opt) list('security_opt', li.security_opt);
+    if (li.devices) list('devices', li.devices);
+    if (li.device_cgroup_rules) list('device_cgroup_rules', li.device_cgroup_rules, true);
+    if (li.group_add) list('group_add', li.group_add, true);
+    if (o.cpus) kv('cpus', JSON.stringify(o.cpus).replace(/"/g, '') === o.cpus && /^\d+(\.\d+)?$/.test(o.cpus) ? o.cpus : yq(o.cpus));
+    if (o.cpu_shares) kv('cpu_shares', /^\d+$/.test(o.cpu_shares) ? o.cpu_shares : yq(o.cpu_shares));
+    if (o.cpu_period) kv('cpu_period', yq(o.cpu_period));
+    if (o.cpu_quota) kv('cpu_quota', yq(o.cpu_quota));
+    if (o.cpuset) kv('cpuset', JSON.stringify(o.cpuset));
+    if (o.mem_limit) kv('mem_limit', yq(o.mem_limit));
+    if (o.mem_reservation) kv('mem_reservation', yq(o.mem_reservation));
+    if (o.memswap_limit) kv('memswap_limit', yq(o.memswap_limit));
+    if (o.shm_size) kv('shm_size', yq(o.shm_size));
+    if (o.pids_limit) kv('pids_limit', /^-?\d+$/.test(o.pids_limit) ? o.pids_limit : yq(o.pids_limit));
+    if (o.oom_score_adj) kv('oom_score_adj', o.oom_score_adj);
+    if (o.oom_kill_disable) kv('oom_kill_disable', 'true');
+    if (o.blkio) S.push('    blkio_config:', '      weight: ' + o.blkio);
+    if (li.ulimits) {
+      S.push('    ulimits:');
+      li.ulimits.forEach(function (u) {
+        var m = /^([a-z]+)=(-?\d+)(?::(-?\d+))?$/.exec(u);
+        if (!m) { W.push('Could not convert --ulimit ' + u); return; }
+        if (m[3] === undefined) S.push('      ' + m[1] + ': ' + m[2]);
+        else S.push('      ' + m[1] + ':', '        soft: ' + m[2], '        hard: ' + m[3]);
+      });
+    }
+    if (li.sysctls) { S.push('    sysctls:'); li.sysctls.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    if (li.storage_opt) { S.push('    storage_opt:'); li.storage_opt.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    if (li.labels) {
+      S.push('    labels:');
+      li.labels.forEach(function (x) { var e = x.indexOf('='); S.push('      ' + yq(e < 0 ? x : x.slice(0, e)) + ': ' + yq(e < 0 ? '' : x.slice(e + 1).replace(/\$/g, function () { dollar = true; return '$$'; }))); });
+    }
+    if (li.label_file) W.push('--label-file is not supported by Compose: copy the labels into "labels:".');
+    if (o.log_driver || li.log_opt) {
+      S.push('    logging:');
+      if (o.log_driver) S.push('      driver: ' + yq(o.log_driver));
+      if (li.log_opt) { S.push('      options:'); li.log_opt.forEach(function (x) { var e = x.indexOf('='); S.push('        ' + yq(x.slice(0, e)) + ': ' + yq(x.slice(e + 1))); }); }
+    }
+    if (o.no_healthcheck) S.push('    healthcheck:', '      disable: true');
+    else if (o.hc_test || o.hc_interval || o.hc_retries || o.hc_timeout || o.hc_start_period) {
+      S.push('    healthcheck:');
+      if (o.hc_test) S.push('      test: ' + yflow(['CMD-SHELL', o.hc_test.replace(/\$/g, function () { dollar = true; return '$$'; })]));
+      if (o.hc_interval) S.push('      interval: ' + yq(drDur(o.hc_interval)));
+      if (o.hc_timeout) S.push('      timeout: ' + yq(drDur(o.hc_timeout)));
+      if (o.hc_retries) S.push('      retries: ' + o.hc_retries);
+      if (o.hc_start_period) S.push('      start_period: ' + yq(drDur(o.hc_start_period)));
+    }
+    if (o.stop_signal) kv('stop_signal', yq(o.stop_signal));
+    if (o.stop_grace_period) kv('stop_grace_period', yq(drDur(o.stop_grace_period)));
+    if (o.gpus) {
+      var g = o.gpus.replace(/^"|"$/g, ''), cm = /^(all|\d+)$/.exec(g), dm = /device=([\d,]+)/.exec(g);
+      S.push('    deploy:', '      resources:', '        reservations:', '          devices:', '            - driver: nvidia');
+      if (dm) S.push('              device_ids: ' + yflow(dm[1].split(',')));
+      else S.push('              count: ' + (cm ? cm[1] : 'all'));
+      S.push('              capabilities: [gpu]');
+    }
+    if (o.rm) W.push('--rm has no Compose equivalent for services: "docker compose down" removes the containers. For one-off tasks use "docker compose run --rm ' + name + '".');
+    if (o.detach) W.push('-d is not part of the file: start the stack in the background with "docker compose up -d".');
+    if (o.publish_all) W.push('-P (publish all exposed ports to random host ports) has no direct Compose equivalent: list the ports under "ports:" (e.g. "- \\"80\\"" picks a random host port).');
+    if (li.ports && li.ports.some(function (x) { return /^\d+:\d+$/.test(x) && +x.split(':')[1] < 60; })) W.push('Ports are written in quotes on purpose: unquoted values like 22:22 are read by YAML 1.1 parsers as base-60 numbers (22:22 becomes 1342).');
+    L.push('  ' + name + ':');
+    L.push.apply(L, S);
+  });
+  if (dollar) W.push('Every "$" in a value was doubled to "$$": Compose would otherwise treat it as a ${VARIABLE} to substitute from your shell or .env file.');
+  var nk = Object.keys(topNet);
+  if (nk.length) { L.push('', 'networks:'); nk.forEach(function (x) { L.push('  ' + yq(x) + ':', '    external: true'); }); W.push('The network' + (nk.length > 1 ? 's ' : ' ') + nk.join(', ') + ' marked "external: true" must already exist (docker network create ' + nk[0] + '). Remove "external: true" to let Compose create and manage it.'); }
+  var vk = Object.keys(topVol);
+  if (vk.length) { L.push('', 'volumes:'); vk.forEach(function (x) { L.push('  ' + yq(x) + ':'); }); W.push('Named volume' + (vk.length > 1 ? 's ' : ' ') + vk.join(', ') + ' will be created as <project>_' + vk[0] + '. To reuse the existing volume from docker run, add "external: true" under it.'); }
+  W = W.filter(function (w, k) { return W.indexOf(w) === k; });
+  return { yaml: L.join('\n') + '\n', warnings: W, count: p.services.length };
+};
 if (typeof module !== 'undefined' && module.exports) module.exports = T;
 if (typeof document === 'undefined') return;
 
@@ -1650,6 +4078,482 @@ UI.whitespace = function (r) {
   });
   on($(r, '#ws-sample'), 'click', function () { raw = 'def main():\r\n    print("hi")   \r\n\tif True:\r\n        return\u00a01\r\n# smart \u201cquotes\u201d and a zero\u200bwidth space\r\n'; enc = null; fname = 'sample.py'; inp.value = raw; run(); });
   run();
+};
+
+UI.sql = function (r) {
+  var inp = $(r, '#sql-in'), out = $(r, '#sql-out'), m = $(r, '#sql-msg'), last = 'fmt';
+  function opts() { return { keywordCase: $(r, '#sql-case').value, indent: $(r, '#sql-indent').value }; }
+  function run(action) {
+    last = action || last;
+    var t = inp.value;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      out.value = last === 'min' ? T.sqlMinify(t, opts()) : T.sqlFormat(t, opts());
+      var toks = T.sqlTokenize(t), depth = 0, bad = '';
+      toks.forEach(function (k) { if (k.t === 'open') depth++; else if (k.t === 'close') depth--; if (depth < 0 && !bad) bad = 'An extra ")" closes a parenthesis that was never opened.'; });
+      if (!bad && depth > 0) bad = depth + ' unclosed "(" — a closing parenthesis is missing.';
+      var last1 = toks.filter(function (k) { return k.t === 'str' || k.t === 'id'; }).pop();
+      if (!bad && last1 && last1.v.length > 1 && last1.v.slice(-1) !== { "'": "'", '"': '"', '`': '`', '[': ']', N: "'", E: "'", X: "'", B: "'", n: "'", e: "'", x: "'", b: "'", $: '$' }[last1.v[0]]) bad = 'A quoted string or identifier is never closed: ' + esc(last1.v.slice(0, 30)) + '…';
+      msg(m, bad ? 'bad' : 'ok', bad ? '⚠ Formatted, but check this: ' + bad : '✓ ' + (last === 'min' ? 'Minified' : 'Formatted') + ' ' + toks.filter(function (k) { return k.t === 'semi'; }).length + ' statement terminator(s), ' + out.value.split('\n').length + ' lines.');
+    } catch (e) { msg(m, 'bad', esc(e.message)); }
+  }
+  on($(r, '#sql-fmt'), 'click', function () { run('fmt'); });
+  on($(r, '#sql-min'), 'click', function () { run('min'); });
+  on($(r, '#sql-case'), 'change', function () { run(); });
+  on($(r, '#sql-indent'), 'change', function () { run(); });
+  on(inp, 'input', debounce(function () { run(); }, 250));
+  on($(r, '#sql-clear'), 'click', function () { inp.value = ''; run(); });
+  on($(r, '#sql-sample'), 'click', function () {
+    inp.value = "with recent as (select user_id, sum(total) as spent from orders where created_at >= now() - interval '30 days' and status in ('paid','shipped') group by user_id) select u.id, u.email, coalesce(r.spent, 0) as spent, case when r.spent > 1000 then 'vip' when r.spent > 0 then 'active' else 'idle' end as segment from users u left join recent r on r.user_id = u.id where u.deleted_at is null and u.id not in (select user_id from bans) order by spent desc limit 50;";
+    run('fmt');
+  });
+  copyBtn($(r, '#sql-copy'), function () { return out.value; });
+};
+
+UI.curl = function (r) {
+  var inp = $(r, '#curl-in'), out = $(r, '#curl-out'), m = $(r, '#curl-msg'), wl = $(r, '#curl-warn'), sum = $(r, '#curl-sum'), lang = 'python';
+  var btns = r.querySelectorAll('[data-lang]');
+  try { lang = localStorage.getItem('curlLang') || 'python'; } catch (e) { /* private mode */ }
+  function run() {
+    btns.forEach(function (b) { b.className = b.getAttribute('data-lang') === lang ? '' : 'sec'; });
+    var t = inp.value; wl.hidden = true; sum.innerHTML = '';
+    if (!t.trim()) { out.textContent = ''; msg(m, '', ''); return; }
+    try {
+      var p = T.curlParse(t);
+      out.textContent = T.CURL_LANGS[lang](p);
+      msg(m, 'ok', '✓ ' + esc(p.method) + ' ' + esc(p.url));
+      wl.innerHTML = p.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !p.warnings.length;
+      var rows = [['Method', p.method], ['URL', p.url]];
+      p.headers.forEach(function (h) { rows.push(['Header', h[0] + ': ' + h[1]]); });
+      if (p.auth) rows.push(['Basic auth', p.auth[0] + ':' + (p.auth[1] ? '•'.repeat(Math.min(8, p.auth[1].length)) : '')]);
+      if (p.body !== null) rows.push(['Body', (p.json !== undefined ? 'JSON · ' : '') + (p.body.length > 300 ? p.body.slice(0, 300) + '…' : p.body)]);
+      p.form.forEach(function (f) { rows.push(['Form field', f.name + (f.file ? ' = file ' + f.file : ' = ' + f.value)]); });
+      var fl = []; if (p.follow) fl.push('follow redirects (-L)'); if (p.insecure) fl.push('skip TLS verification (-k)'); if (p.compressed) fl.push('compressed'); if (p.timeout) fl.push('timeout ' + p.timeout + 's'); if (p.proxy) fl.push('proxy ' + p.proxy);
+      if (fl.length) rows.push(['Options', fl.join(', ')]);
+      sum.innerHTML = rows.map(function (x) { return '<tr><th>' + esc(x[0]) + '</th><td><code>' + esc(x[1]) + '</code></td></tr>'; }).join('');
+    } catch (e) { out.textContent = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  btns.forEach(function (b) { on(b, 'click', function () { lang = b.getAttribute('data-lang'); try { localStorage.setItem('curlLang', lang); } catch (e) { /* ignore */ } run(); }); });
+  on(inp, 'input', debounce(run, 200));
+  on($(r, '#curl-sample'), 'click', function () {
+    inp.value = "curl -X POST 'https://api.example.com/v1/orders?notify=true' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer YOUR_TOKEN' \\\n  -b 'session=abc123' \\\n  --compressed -L \\\n  --data-raw '{\"item\":\"book\",\"qty\":2,\"gift\":false}'";
+    run();
+  });
+  copyBtn($(r, '#curl-copy'), function () { return out.textContent; });
+  run();
+};
+
+UI.gitignore = function (r) {
+  var box = $(r, '#gi-boxes'), out = $(r, '#gi-out'), extra = $(r, '#gi-extra'), paths = $(r, '#gi-paths'), res = $(r, '#gi-res'), stat = $(r, '#gi-stat');
+  var def = { Node: 1, macOS: 1, Windows: 1, VSCode: 1 };
+  box.innerHTML = Object.keys(T.GITIGNORE).map(function (k) { return '<label><input type="checkbox" value="' + k + '"' + (def[k] ? ' checked' : '') + '> ' + esc(T.GITIGNORE[k].label) + '</label>'; }).join('');
+  function gen() {
+    var sel = [].slice.call(box.querySelectorAll('input:checked')).map(function (c) { return c.value; });
+    out.value = sel.length || extra.value.trim() ? T.gitignoreCombine(sel, extra.value) : '';
+    test();
+  }
+  function test() {
+    var rules = T.gitignoreParse(out.value), n = rules.length;
+    stat.textContent = n + ' pattern' + (n === 1 ? '' : 's');
+    res.innerHTML = paths.value.split('\n').filter(function (p) { return p.trim(); }).slice(0, 200).map(function (p) {
+      var x = T.gitignoreCheck(rules, p), why;
+      if (x.ignored) why = x.via ? 'inside ignored directory <code>' + esc(x.via) + '</code> (line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>) — files in an excluded directory cannot be re-included with "!"' : 'line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>';
+      else why = x.rule ? 're-included by line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>' : 'no pattern matches';
+      return '<tr class="' + (x.ignored ? 'ign' : 'trk') + '"><th><code>' + esc(p.trim()) + '</code></th><td><b>' + (x.ignored ? 'Ignored' : 'Not ignored') + '</b> · ' + why + '</td></tr>';
+    }).join('');
+  }
+  on(box, 'change', gen);
+  on(extra, 'input', debounce(gen, 250));
+  on(out, 'input', debounce(test, 200));
+  on(paths, 'input', debounce(test, 200));
+  copyBtn($(r, '#gi-copy'), function () { return out.value; });
+  on($(r, '#gi-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: 'text/plain' })); a.download = '.gitignore'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+  gen();
+};
+
+UI.csv = function (r) {
+  var inp = $(r, '#csv-in'), out = $(r, '#csv-out'), m = $(r, '#csv-msg'), wl = $(r, '#csv-warn'), dir = 'c2j', dbtn = r.querySelectorAll('[data-dir]');
+  function delim() { var d = $(r, '#csv-delim').value; return d === 'tab' ? '\t' : d; }
+  function setDir(d) {
+    dir = d;
+    dbtn.forEach(function (b) { b.className = b.getAttribute('data-dir') === d ? '' : 'sec'; });
+    $(r, '#csv-in-l').textContent = d === 'c2j' ? 'Paste CSV' : 'Paste JSON (an array of objects or arrays)';
+    $(r, '#csv-infer-l').hidden = d !== 'c2j'; $(r, '#csv-crlf-l').hidden = d === 'c2j'; $(r, '#csv-flat-l').hidden = d === 'c2j';
+    run();
+  }
+  function run() {
+    var t = inp.value; wl.hidden = true;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      if (dir === 'c2j') {
+        var res = T.csvToJson(t, { delimiter: delim(), header: $(r, '#csv-header').checked, infer: $(r, '#csv-infer').checked });
+        out.value = JSON.stringify(res.data, null, 2);
+        var dn = { ',': 'comma', ';': 'semicolon', '\t': 'tab', '|': 'pipe' }[res.delimiter];
+        msg(m, 'ok', '✓ ' + res.data.length + ' record' + (res.data.length === 1 ? '' : 's') + ' · delimiter: ' + dn + ($(r, '#csv-delim').value === 'auto' ? ' (detected)' : ''));
+        wl.innerHTML = res.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !res.warnings.length;
+      } else {
+        var chk = T.jsonCheck(t);
+        if (!chk.ok) { out.value = ''; msg(m, 'bad', '✗ Invalid JSON at line ' + chk.line + ', column ' + chk.col + ': ' + esc(chk.message)); return; }
+        out.value = T.jsonToCsv(chk.value, { delimiter: delim(), header: $(r, '#csv-header').checked, crlf: $(r, '#csv-crlf').checked, flatten: $(r, '#csv-flat').checked });
+        var lines = T.csvParse(out.value, delim() === 'auto' ? ',' : delim()).rows.length;
+        msg(m, 'ok', '✓ ' + lines + ' CSV row' + (lines === 1 ? '' : 's') + ' (including header)');
+      }
+    } catch (e) { out.value = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  dbtn.forEach(function (b) { on(b, 'click', function () { setDir(b.getAttribute('data-dir')); }); });
+  ['#csv-delim', '#csv-header', '#csv-infer', '#csv-crlf', '#csv-flat'].forEach(function (s) { on($(r, s), 'change', run); });
+  on(inp, 'input', debounce(run, 250));
+  on($(r, '#csv-file'), 'change', function () {
+    var f = $(r, '#csv-file').files[0]; if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { var d = T.decodeFileBytes(new Uint8Array(rd.result)); inp.value = d.text; setDir(/\.json$/i.test(f.name) || /^\s*[\[{]/.test(d.text) ? 'j2c' : 'c2j'); if (d.invalid) msg(m, 'bad', 'The file is not valid UTF-8 and was read as Windows-1252: check accented characters.'); };
+    rd.readAsArrayBuffer(f);
+  });
+  on($(r, '#csv-sample'), 'click', function () {
+    if (dir === 'c2j') inp.value = 'id;name;city;active;balance\n1;"Smith, Anna";"Paris";true;1250.50\n2;"O\'Brien ""Bob""";Rome;false;0\n3;"Lee\nMultiline";"New York";true;\n';
+    else inp.value = '[\n  {"id": 1, "name": "Anna", "address": {"city": "Paris", "zip": "75001"}, "tags": ["admin", "beta"]},\n  {"id": 2, "name": "Bob, Jr.", "address": {"city": "Rome"}, "note": "says \\"hi\\""}\n]';
+    run();
+  });
+  on($(r, '#csv-swap'), 'click', function () { if (!out.value) return; inp.value = out.value; setDir(dir === 'c2j' ? 'j2c' : 'c2j'); });
+  copyBtn($(r, '#csv-copy'), function () { return out.value; });
+  on($(r, '#csv-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: dir === 'c2j' ? 'application/json' : 'text/csv' })); a.download = dir === 'c2j' ? 'data.json' : 'data.csv'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+  setDir('c2j');
+};
+
+UI.subnet = function (r) {
+  var inp = $(r, '#net-in'), m = $(r, '#net-msg'), tb = $(r, '#net-out'), ip = $(r, '#net-ip'), cm = $(r, '#net-cmsg'), sp = $(r, '#net-split'), subs = $(r, '#net-subs'), sc = $(r, '#net-scount');
+  var info = null, v6 = false;
+  function row(k, v, c) { return '<tr><th>' + k + '</th><td><code>' + esc(v) + '</code>' + (c ? ' <small>' + c + '</small>' : '') + '</td></tr>'; }
+  function fmtN(n) { return Number(n).toLocaleString('en-US'); }
+  function run() {
+    var t = inp.value.trim(); tb.innerHTML = ''; subs.innerHTML = ''; sc.textContent = ''; info = null;
+    if (!t) { msg(m, '', ''); return; }
+    try {
+      v6 = t.indexOf(':') >= 0;
+      if (v6) {
+        var x = info = T.ip6Info(t);
+        tb.innerHTML = row('Address', x.address) + row('Expanded', x.expanded) + row('Network', x.network) + row('First address', x.first) + row('Last address', x.last) +
+          row('Addresses', x.prefix >= 64 && x.prefix < 128 ? x.totalPow : x.total, x.prefix < 128 ? '(' + x.totalPow + (x.prefix <= 64 ? '; a /64 is the standard size for one LAN' : '') + ')' : '') + row('Type', x.type) + row('Reverse DNS (PTR)', x.ptr);
+        msg(m, 'ok', '✓ IPv6 ' + esc(x.network) + (x.hostBitsSet ? ' <small>(you entered a host address inside this network)</small>' : ''));
+      } else {
+        var c = info = T.cidrInfo(t);
+        tb.innerHTML = row('Network address', c.network) + row('CIDR notation', c.cidr) + row('Netmask', c.netmask, '/' + c.prefix) + row('Wildcard (inverse) mask', c.wildcard, 'for Cisco ACLs, OSPF') +
+          row('Broadcast address', c.broadcast || '—', c.prefix >= 31 ? '(no broadcast in a /' + c.prefix + ')' : '') + row('First usable host', c.first) + row('Last usable host', c.last) +
+          row('Total addresses', fmtN(c.total)) + row('Usable hosts', fmtN(c.usable), c.prefix === 31 ? '(point-to-point link, RFC 3021)' : c.prefix < 31 ? '(minus network and broadcast)' : '') +
+          row('Address type', c.type) + row('Class (legacy)', c.cls) + row('Netmask in binary', c.binMask) + row('Address in binary', c.binAddr) + row('Integer / hex', c.int + ' / ' + c.hex) +
+          (c.ptr ? row('Reverse DNS zone', c.ptr) : '');
+        msg(m, c.hostBitsSet ? '' : 'ok', c.hostBitsSet ? 'Note: ' + esc(c.address) + ' is a host inside the network <b>' + esc(c.cidr) + '</b>. Many tools (Docker, Terraform, AWS, Python strict mode) require the network address itself.' : '✓ ' + esc(c.cidr));
+        var opts = '';
+        for (var p = c.prefix + 1; p <= Math.min(32, c.prefix + 16); p++) opts += '<option value="' + p + '">/' + p + ' — ' + fmtN(Math.pow(2, p - c.prefix)) + ' subnets of ' + fmtN(Math.pow(2, 32 - p)) + '</option>';
+        sp.innerHTML = opts || '<option>—</option>';
+        if (opts) sp.value = String(Math.min(32, c.prefix + 2));
+        split();
+      }
+    } catch (e) { msg(m, 'bad', '✗ ' + esc(e.message)); }
+    check();
+  }
+  function split() {
+    subs.innerHTML = ''; sc.textContent = '';
+    if (!info || v6 || !/^\d+$/.test(sp.value)) return;
+    var s = T.cidrSplit(info.cidr, +sp.value, 256);
+    sc.textContent = fmtN(s.count) + ' subnets' + (s.count > 256 ? ' (first 256 shown)' : '');
+    subs.innerHTML = '<tr><th>Subnet</th><td><b>Usable hosts</b> · <b>Broadcast</b></td></tr>' + s.subnets.map(function (x) { return '<tr><th><code>' + x.cidr + '</code></th><td><code>' + x.first + ' – ' + x.last + '</code> · <code>' + (x.broadcast || '—') + '</code></td></tr>'; }).join('');
+  }
+  function check() {
+    var q = ip.value.trim();
+    if (!q || !info) { msg(cm, '', ''); return; }
+    try {
+      if (v6) {
+        var a = T.ip6Info(q), inside = a.n >= T.ip6Parse(info.first).n && a.n <= T.ip6Parse(info.last).n;
+        msg(cm, inside ? 'ok' : 'bad', (inside ? '✓ ' : '✗ ') + esc(a.address) + (inside ? ' is inside ' : ' is not in ') + esc(info.network));
+      } else if (q.indexOf('/') >= 0 || /\s/.test(q)) {
+        var o = T.cidrInfo(q), ov = T.cidrOverlap(info.cidr, o.cidr);
+        msg(cm, ov ? 'bad' : 'ok', ov ? '⚠ ' + esc(o.cidr) + ' <b>overlaps</b> ' + esc(info.cidr) + ' (' + o.network + '–' + T.ip4Str(o.bcInt) + ' vs ' + info.network + '–' + T.ip4Str(info.bcInt) + '). Overlapping ranges cause routing conflicts, e.g. a VPN or Docker network hiding your LAN.' : '✓ ' + esc(o.cidr) + ' does not overlap ' + esc(info.cidr) + '.');
+      } else {
+        var yes = T.cidrContains(info.cidr, q);
+        msg(cm, yes ? 'ok' : 'bad', (yes ? '✓ ' : '✗ ') + esc(q) + (yes ? ' is inside ' : ' is not in ') + esc(info.cidr) + (yes && T.ip4Parse(q) === info.netInt && info.prefix < 31 ? ' (it is the network address, not a usable host)' : yes && T.ip4Parse(q) === info.bcInt && info.prefix < 31 ? ' (it is the broadcast address, not a usable host)' : ''));
+      }
+    } catch (e) { msg(cm, 'bad', '✗ ' + esc(e.message)); }
+  }
+  on(inp, 'input', debounce(run, 200));
+  on(ip, 'input', debounce(check, 200));
+  on(sp, 'change', split);
+  r.querySelectorAll('[data-net]').forEach(function (b) { on(b, 'click', function () { inp.value = b.getAttribute('data-net'); run(); }); });
+  run();
+};
+
+UI.dockerrun = function (r) {
+  var inp = $(r, '#dr-in'), out = $(r, '#dr-out'), m = $(r, '#dr-msg'), wl = $(r, '#dr-warn');
+  function run() {
+    var t = inp.value; wl.hidden = true;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      var res = T.dockerRunToCompose(t);
+      out.value = res.yaml;
+      msg(m, 'ok', '✓ ' + res.count + ' service' + (res.count > 1 ? 's' : '') + '. Save as <code>compose.yaml</code> and run <code>docker compose up -d</code>.');
+      wl.innerHTML = res.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !res.warnings.length;
+    } catch (e) { out.value = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  on($(r, '#dr-conv'), 'click', run);
+  on(inp, 'input', debounce(run, 250));
+  on($(r, '#dr-sample'), 'click', function () {
+    inp.value = 'docker run -d \\\n  --name web \\\n  -p 8080:80 \\\n  -v "$(pwd)/html:/usr/share/nginx/html:ro" \\\n  -e TZ=Europe/Berlin \\\n  --restart unless-stopped \\\n  nginx:alpine';
+    run();
+  });
+  on($(r, '#dr-sample2'), 'click', function () {
+    inp.value = "docker run -d --name db --network appnet -e POSTGRES_PASSWORD='s3cr$t' -v pgdata:/var/lib/postgresql/data --health-cmd 'pg_isready -U postgres' --health-interval 10s postgres:16\n" +
+      'docker run -d --name api --network appnet -p 3000:3000 -e DATABASE_URL=postgres://postgres@db:5432/postgres --env-file .env -w /app -u 1000:1000 --restart on-failure myorg/api:1.4 node server.js';
+    run();
+  });
+  copyBtn($(r, '#dr-copy'), function () { return out.value; });
+  on($(r, '#dr-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: 'text/yaml' })); a.download = 'compose.yaml'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+};
+
+UI.sql = function (r) {
+  var inp = $(r, '#sql-in'), out = $(r, '#sql-out'), m = $(r, '#sql-msg'), last = 'fmt';
+  function opts() { return { keywordCase: $(r, '#sql-case').value, indent: $(r, '#sql-indent').value }; }
+  function run(action) {
+    last = action || last;
+    var t = inp.value;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      out.value = last === 'min' ? T.sqlMinify(t, opts()) : T.sqlFormat(t, opts());
+      var toks = T.sqlTokenize(t), depth = 0, bad = '';
+      toks.forEach(function (k) { if (k.t === 'open') depth++; else if (k.t === 'close') depth--; if (depth < 0 && !bad) bad = 'An extra ")" closes a parenthesis that was never opened.'; });
+      if (!bad && depth > 0) bad = depth + ' unclosed "(" — a closing parenthesis is missing.';
+      var last1 = toks.filter(function (k) { return k.t === 'str' || k.t === 'id'; }).pop();
+      if (!bad && last1 && last1.v.length > 1 && last1.v.slice(-1) !== { "'": "'", '"': '"', '`': '`', '[': ']', N: "'", E: "'", X: "'", B: "'", n: "'", e: "'", x: "'", b: "'", $: '$' }[last1.v[0]]) bad = 'A quoted string or identifier is never closed: ' + esc(last1.v.slice(0, 30)) + '…';
+      msg(m, bad ? 'bad' : 'ok', bad ? '⚠ Formatted, but check this: ' + bad : '✓ ' + (last === 'min' ? 'Minified' : 'Formatted') + ' ' + toks.filter(function (k) { return k.t === 'semi'; }).length + ' statement terminator(s), ' + out.value.split('\n').length + ' lines.');
+    } catch (e) { msg(m, 'bad', esc(e.message)); }
+  }
+  on($(r, '#sql-fmt'), 'click', function () { run('fmt'); });
+  on($(r, '#sql-min'), 'click', function () { run('min'); });
+  on($(r, '#sql-case'), 'change', function () { run(); });
+  on($(r, '#sql-indent'), 'change', function () { run(); });
+  on(inp, 'input', debounce(function () { run(); }, 250));
+  on($(r, '#sql-clear'), 'click', function () { inp.value = ''; run(); });
+  on($(r, '#sql-sample'), 'click', function () {
+    inp.value = "with recent as (select user_id, sum(total) as spent from orders where created_at >= now() - interval '30 days' and status in ('paid','shipped') group by user_id) select u.id, u.email, coalesce(r.spent, 0) as spent, case when r.spent > 1000 then 'vip' when r.spent > 0 then 'active' else 'idle' end as segment from users u left join recent r on r.user_id = u.id where u.deleted_at is null and u.id not in (select user_id from bans) order by spent desc limit 50;";
+    run('fmt');
+  });
+  copyBtn($(r, '#sql-copy'), function () { return out.value; });
+};
+
+UI.curl = function (r) {
+  var inp = $(r, '#curl-in'), out = $(r, '#curl-out'), m = $(r, '#curl-msg'), wl = $(r, '#curl-warn'), sum = $(r, '#curl-sum'), lang = 'python';
+  var btns = r.querySelectorAll('[data-lang]');
+  try { lang = localStorage.getItem('curlLang') || 'python'; } catch (e) { /* private mode */ }
+  function run() {
+    btns.forEach(function (b) { b.className = b.getAttribute('data-lang') === lang ? '' : 'sec'; });
+    var t = inp.value; wl.hidden = true; sum.innerHTML = '';
+    if (!t.trim()) { out.textContent = ''; msg(m, '', ''); return; }
+    try {
+      var p = T.curlParse(t);
+      out.textContent = T.CURL_LANGS[lang](p);
+      msg(m, 'ok', '✓ ' + esc(p.method) + ' ' + esc(p.url));
+      wl.innerHTML = p.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !p.warnings.length;
+      var rows = [['Method', p.method], ['URL', p.url]];
+      p.headers.forEach(function (h) { rows.push(['Header', h[0] + ': ' + h[1]]); });
+      if (p.auth) rows.push(['Basic auth', p.auth[0] + ':' + (p.auth[1] ? '•'.repeat(Math.min(8, p.auth[1].length)) : '')]);
+      if (p.body !== null) rows.push(['Body', (p.json !== undefined ? 'JSON · ' : '') + (p.body.length > 300 ? p.body.slice(0, 300) + '…' : p.body)]);
+      p.form.forEach(function (f) { rows.push(['Form field', f.name + (f.file ? ' = file ' + f.file : ' = ' + f.value)]); });
+      var fl = []; if (p.follow) fl.push('follow redirects (-L)'); if (p.insecure) fl.push('skip TLS verification (-k)'); if (p.compressed) fl.push('compressed'); if (p.timeout) fl.push('timeout ' + p.timeout + 's'); if (p.proxy) fl.push('proxy ' + p.proxy);
+      if (fl.length) rows.push(['Options', fl.join(', ')]);
+      sum.innerHTML = rows.map(function (x) { return '<tr><th>' + esc(x[0]) + '</th><td><code>' + esc(x[1]) + '</code></td></tr>'; }).join('');
+    } catch (e) { out.textContent = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  btns.forEach(function (b) { on(b, 'click', function () { lang = b.getAttribute('data-lang'); try { localStorage.setItem('curlLang', lang); } catch (e) { /* ignore */ } run(); }); });
+  on(inp, 'input', debounce(run, 200));
+  on($(r, '#curl-sample'), 'click', function () {
+    inp.value = "curl -X POST 'https://api.example.com/v1/orders?notify=true' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer YOUR_TOKEN' \\\n  -b 'session=abc123' \\\n  --compressed -L \\\n  --data-raw '{\"item\":\"book\",\"qty\":2,\"gift\":false}'";
+    run();
+  });
+  copyBtn($(r, '#curl-copy'), function () { return out.textContent; });
+  run();
+};
+
+UI.gitignore = function (r) {
+  var box = $(r, '#gi-boxes'), out = $(r, '#gi-out'), extra = $(r, '#gi-extra'), paths = $(r, '#gi-paths'), res = $(r, '#gi-res'), stat = $(r, '#gi-stat');
+  var def = { Node: 1, macOS: 1, Windows: 1, VSCode: 1 };
+  box.innerHTML = Object.keys(T.GITIGNORE).map(function (k) { return '<label><input type="checkbox" value="' + k + '"' + (def[k] ? ' checked' : '') + '> ' + esc(T.GITIGNORE[k].label) + '</label>'; }).join('');
+  function gen() {
+    var sel = [].slice.call(box.querySelectorAll('input:checked')).map(function (c) { return c.value; });
+    out.value = sel.length || extra.value.trim() ? T.gitignoreCombine(sel, extra.value) : '';
+    test();
+  }
+  function test() {
+    var rules = T.gitignoreParse(out.value), n = rules.length;
+    stat.textContent = n + ' pattern' + (n === 1 ? '' : 's');
+    res.innerHTML = paths.value.split('\n').filter(function (p) { return p.trim(); }).slice(0, 200).map(function (p) {
+      var x = T.gitignoreCheck(rules, p), why;
+      if (x.ignored) why = x.via ? 'inside ignored directory <code>' + esc(x.via) + '</code> (line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>) — files in an excluded directory cannot be re-included with "!"' : 'line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>';
+      else why = x.rule ? 're-included by line ' + x.rule.line + ': <code>' + esc(x.rule.text) + '</code>' : 'no pattern matches';
+      return '<tr class="' + (x.ignored ? 'ign' : 'trk') + '"><th><code>' + esc(p.trim()) + '</code></th><td><b>' + (x.ignored ? 'Ignored' : 'Not ignored') + '</b> · ' + why + '</td></tr>';
+    }).join('');
+  }
+  on(box, 'change', gen);
+  on(extra, 'input', debounce(gen, 250));
+  on(out, 'input', debounce(test, 200));
+  on(paths, 'input', debounce(test, 200));
+  copyBtn($(r, '#gi-copy'), function () { return out.value; });
+  on($(r, '#gi-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: 'text/plain' })); a.download = '.gitignore'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+  gen();
+};
+
+UI.csv = function (r) {
+  var inp = $(r, '#csv-in'), out = $(r, '#csv-out'), m = $(r, '#csv-msg'), wl = $(r, '#csv-warn'), dir = 'c2j', dbtn = r.querySelectorAll('[data-dir]');
+  function delim() { var d = $(r, '#csv-delim').value; return d === 'tab' ? '\t' : d; }
+  function setDir(d) {
+    dir = d;
+    dbtn.forEach(function (b) { b.className = b.getAttribute('data-dir') === d ? '' : 'sec'; });
+    $(r, '#csv-in-l').textContent = d === 'c2j' ? 'Paste CSV' : 'Paste JSON (an array of objects or arrays)';
+    $(r, '#csv-infer-l').hidden = d !== 'c2j'; $(r, '#csv-crlf-l').hidden = d === 'c2j'; $(r, '#csv-flat-l').hidden = d === 'c2j';
+    run();
+  }
+  function run() {
+    var t = inp.value; wl.hidden = true;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      if (dir === 'c2j') {
+        var res = T.csvToJson(t, { delimiter: delim(), header: $(r, '#csv-header').checked, infer: $(r, '#csv-infer').checked });
+        out.value = JSON.stringify(res.data, null, 2);
+        var dn = { ',': 'comma', ';': 'semicolon', '\t': 'tab', '|': 'pipe' }[res.delimiter];
+        msg(m, 'ok', '✓ ' + res.data.length + ' record' + (res.data.length === 1 ? '' : 's') + ' · delimiter: ' + dn + ($(r, '#csv-delim').value === 'auto' ? ' (detected)' : ''));
+        wl.innerHTML = res.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !res.warnings.length;
+      } else {
+        var chk = T.jsonCheck(t);
+        if (!chk.ok) { out.value = ''; msg(m, 'bad', '✗ Invalid JSON at line ' + chk.line + ', column ' + chk.col + ': ' + esc(chk.message)); return; }
+        out.value = T.jsonToCsv(chk.value, { delimiter: delim(), header: $(r, '#csv-header').checked, crlf: $(r, '#csv-crlf').checked, flatten: $(r, '#csv-flat').checked });
+        var lines = T.csvParse(out.value, delim() === 'auto' ? ',' : delim()).rows.length;
+        msg(m, 'ok', '✓ ' + lines + ' CSV row' + (lines === 1 ? '' : 's') + ' (including header)');
+      }
+    } catch (e) { out.value = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  dbtn.forEach(function (b) { on(b, 'click', function () { setDir(b.getAttribute('data-dir')); }); });
+  ['#csv-delim', '#csv-header', '#csv-infer', '#csv-crlf', '#csv-flat'].forEach(function (s) { on($(r, s), 'change', run); });
+  on(inp, 'input', debounce(run, 250));
+  on($(r, '#csv-file'), 'change', function () {
+    var f = $(r, '#csv-file').files[0]; if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { var d = T.decodeFileBytes(new Uint8Array(rd.result)); inp.value = d.text; setDir(/\.json$/i.test(f.name) || /^\s*[\[{]/.test(d.text) ? 'j2c' : 'c2j'); if (d.invalid) msg(m, 'bad', 'The file is not valid UTF-8 and was read as Windows-1252: check accented characters.'); };
+    rd.readAsArrayBuffer(f);
+  });
+  on($(r, '#csv-sample'), 'click', function () {
+    if (dir === 'c2j') inp.value = 'id;name;city;active;balance\n1;"Smith, Anna";"Paris";true;1250.50\n2;"O\'Brien ""Bob""";Rome;false;0\n3;"Lee\nMultiline";"New York";true;\n';
+    else inp.value = '[\n  {"id": 1, "name": "Anna", "address": {"city": "Paris", "zip": "75001"}, "tags": ["admin", "beta"]},\n  {"id": 2, "name": "Bob, Jr.", "address": {"city": "Rome"}, "note": "says \\"hi\\""}\n]';
+    run();
+  });
+  on($(r, '#csv-swap'), 'click', function () { if (!out.value) return; inp.value = out.value; setDir(dir === 'c2j' ? 'j2c' : 'c2j'); });
+  copyBtn($(r, '#csv-copy'), function () { return out.value; });
+  on($(r, '#csv-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: dir === 'c2j' ? 'application/json' : 'text/csv' })); a.download = dir === 'c2j' ? 'data.json' : 'data.csv'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
+  setDir('c2j');
+};
+
+UI.subnet = function (r) {
+  var inp = $(r, '#net-in'), m = $(r, '#net-msg'), tb = $(r, '#net-out'), ip = $(r, '#net-ip'), cm = $(r, '#net-cmsg'), sp = $(r, '#net-split'), subs = $(r, '#net-subs'), sc = $(r, '#net-scount');
+  var info = null, v6 = false;
+  function row(k, v, c) { return '<tr><th>' + k + '</th><td><code>' + esc(v) + '</code>' + (c ? ' <small>' + c + '</small>' : '') + '</td></tr>'; }
+  function fmtN(n) { return Number(n).toLocaleString('en-US'); }
+  function run() {
+    var t = inp.value.trim(); tb.innerHTML = ''; subs.innerHTML = ''; sc.textContent = ''; info = null;
+    if (!t) { msg(m, '', ''); return; }
+    try {
+      v6 = t.indexOf(':') >= 0;
+      if (v6) {
+        var x = info = T.ip6Info(t);
+        tb.innerHTML = row('Address', x.address) + row('Expanded', x.expanded) + row('Network', x.network) + row('First address', x.first) + row('Last address', x.last) +
+          row('Addresses', BigInt(x.total).toLocaleString('en-US'), x.prefix < 128 ? '(' + x.totalPow + (x.prefix === 64 ? '; a /64 is the standard size for one LAN' : '') + ')' : '') + row('Type', x.type) + row('Reverse DNS (PTR)', x.ptr);
+        msg(m, 'ok', '✓ IPv6 ' + esc(x.network) + (x.hostBitsSet ? ' <small>(you entered a host address inside this network)</small>' : ''));
+      } else {
+        var c = info = T.cidrInfo(t);
+        tb.innerHTML = row('Network address', c.network) + row('CIDR notation', c.cidr) + row('Netmask', c.netmask, '/' + c.prefix) + row('Wildcard (inverse) mask', c.wildcard, 'for Cisco ACLs, OSPF') +
+          row('Broadcast address', c.broadcast || '—', c.prefix >= 31 ? '(no broadcast in a /' + c.prefix + ')' : '') + row('First usable host', c.first) + row('Last usable host', c.last) +
+          row('Total addresses', fmtN(c.total)) + row('Usable hosts', fmtN(c.usable), c.prefix === 31 ? '(point-to-point link, RFC 3021)' : c.prefix < 31 ? '(minus network and broadcast)' : '') +
+          row('Address type', c.type) + row('Class (legacy)', c.cls) + row('Netmask in binary', c.binMask) + row('Address in binary', c.binAddr) + row('Integer / hex', c.int + ' / ' + c.hex) +
+          (c.ptr ? row('Reverse DNS zone', c.ptr) : '');
+        msg(m, c.hostBitsSet ? '' : 'ok', c.hostBitsSet ? 'Note: ' + esc(c.address) + ' is a host inside the network <b>' + esc(c.cidr) + '</b>. Many tools (Docker, Terraform, AWS, Python strict mode) require the network address itself.' : '✓ ' + esc(c.cidr));
+        var opts = '';
+        for (var p = c.prefix + 1; p <= Math.min(32, c.prefix + 16); p++) opts += '<option value="' + p + '">/' + p + ' — ' + fmtN(Math.pow(2, p - c.prefix)) + ' subnets of ' + fmtN(Math.pow(2, 32 - p)) + '</option>';
+        sp.innerHTML = opts || '<option>—</option>';
+        if (opts) sp.value = String(Math.min(32, c.prefix + 2));
+        split();
+      }
+    } catch (e) { msg(m, 'bad', '✗ ' + esc(e.message)); }
+    check();
+  }
+  function split() {
+    subs.innerHTML = ''; sc.textContent = '';
+    if (!info || v6 || !/^\d+$/.test(sp.value)) return;
+    var s = T.cidrSplit(info.cidr, +sp.value, 256);
+    sc.textContent = fmtN(s.count) + ' subnets' + (s.count > 256 ? ' (first 256 shown)' : '');
+    subs.innerHTML = '<tr><th>Subnet</th><td><b>Usable hosts</b> · <b>Broadcast</b></td></tr>' + s.subnets.map(function (x) { return '<tr><th><code>' + x.cidr + '</code></th><td><code>' + x.first + ' – ' + x.last + '</code> · <code>' + (x.broadcast || '—') + '</code></td></tr>'; }).join('');
+  }
+  function check() {
+    var q = ip.value.trim();
+    if (!q || !info) { msg(cm, '', ''); return; }
+    try {
+      if (v6) {
+        var a = T.ip6Info(q), inside = a.n >= T.ip6Parse(info.first).n && a.n <= T.ip6Parse(info.last).n;
+        msg(cm, inside ? 'ok' : 'bad', (inside ? '✓ ' : '✗ ') + esc(a.address) + (inside ? ' is inside ' : ' is not in ') + esc(info.network));
+      } else if (q.indexOf('/') >= 0 || /\s/.test(q)) {
+        var o = T.cidrInfo(q), ov = T.cidrOverlap(info.cidr, o.cidr);
+        msg(cm, ov ? 'bad' : 'ok', ov ? '⚠ ' + esc(o.cidr) + ' <b>overlaps</b> ' + esc(info.cidr) + ' (' + o.network + '–' + T.ip4Str(o.bcInt) + ' vs ' + info.network + '–' + T.ip4Str(info.bcInt) + '). Overlapping ranges cause routing conflicts, e.g. a VPN or Docker network hiding your LAN.' : '✓ ' + esc(o.cidr) + ' does not overlap ' + esc(info.cidr) + '.');
+      } else {
+        var yes = T.cidrContains(info.cidr, q);
+        msg(cm, yes ? 'ok' : 'bad', (yes ? '✓ ' : '✗ ') + esc(q) + (yes ? ' is inside ' : ' is not in ') + esc(info.cidr) + (yes && T.ip4Parse(q) === info.netInt && info.prefix < 31 ? ' (it is the network address, not a usable host)' : yes && T.ip4Parse(q) === info.bcInt && info.prefix < 31 ? ' (it is the broadcast address, not a usable host)' : ''));
+      }
+    } catch (e) { msg(cm, 'bad', '✗ ' + esc(e.message)); }
+  }
+  on(inp, 'input', debounce(run, 200));
+  on(ip, 'input', debounce(check, 200));
+  on(sp, 'change', split);
+  r.querySelectorAll('[data-net]').forEach(function (b) { on(b, 'click', function () { inp.value = b.getAttribute('data-net'); run(); }); });
+  run();
+};
+
+UI.dockerrun = function (r) {
+  var inp = $(r, '#dr-in'), out = $(r, '#dr-out'), m = $(r, '#dr-msg'), wl = $(r, '#dr-warn');
+  function run() {
+    var t = inp.value; wl.hidden = true;
+    if (!t.trim()) { out.value = ''; msg(m, '', ''); return; }
+    try {
+      var res = T.dockerRunToCompose(t);
+      out.value = res.yaml;
+      msg(m, 'ok', '✓ ' + res.count + ' service' + (res.count > 1 ? 's' : '') + '. Save as <code>compose.yaml</code> and run <code>docker compose up -d</code>.');
+      wl.innerHTML = res.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join(''); wl.hidden = !res.warnings.length;
+    } catch (e) { out.value = ''; msg(m, 'bad', '✗ ' + esc(e.message)); }
+  }
+  on($(r, '#dr-conv'), 'click', run);
+  on(inp, 'input', debounce(run, 250));
+  on($(r, '#dr-sample'), 'click', function () {
+    inp.value = 'docker run -d \\\n  --name web \\\n  -p 8080:80 \\\n  -v "$(pwd)/html:/usr/share/nginx/html:ro" \\\n  -e TZ=Europe/Berlin \\\n  --restart unless-stopped \\\n  nginx:alpine';
+    run();
+  });
+  on($(r, '#dr-sample2'), 'click', function () {
+    inp.value = "docker run -d --name db --network appnet -e POSTGRES_PASSWORD='s3cr$t' -v pgdata:/var/lib/postgresql/data --health-cmd 'pg_isready -U postgres' --health-interval 10s postgres:16\n" +
+      'docker run -d --name api --network appnet -p 3000:3000 -e DATABASE_URL=postgres://postgres@db:5432/postgres --env-file .env -w /app -u 1000:1000 --restart on-failure myorg/api:1.4 node server.js';
+    run();
+  });
+  copyBtn($(r, '#dr-copy'), function () { return out.value; });
+  on($(r, '#dr-dl'), 'click', function () {
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([out.value], { type: 'text/yaml' })); a.download = 'compose.yaml'; document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  });
 };
 
 document.querySelectorAll('[data-tool]').forEach(function (el) { var f = UI[el.getAttribute('data-tool')]; if (f) f(el); });

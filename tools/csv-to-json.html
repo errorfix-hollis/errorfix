@@ -1,0 +1,16 @@
+<div class="row" id="csv-dir">
+<button data-dir="c2j">CSV → JSON</button><button data-dir="j2c" class="sec">JSON → CSV</button>
+<label>Delimiter <select id="csv-delim" class="inline"><option value="auto">Auto-detect</option><option value=",">Comma ,</option><option value=";">Semicolon ;</option><option value="tab">Tab</option><option value="|">Pipe |</option></select></label>
+<label><input type="checkbox" id="csv-header" checked> First row is a header</label>
+<label id="csv-infer-l"><input type="checkbox" id="csv-infer" checked> Convert numbers, true/false, empty → null</label>
+<label id="csv-crlf-l" hidden><input type="checkbox" id="csv-crlf"> CRLF line endings (RFC 4180, Excel)</label>
+<label id="csv-flat-l" hidden><input type="checkbox" id="csv-flat" checked> Flatten nested objects (a.b)</label>
+</div>
+<label for="csv-in" id="csv-in-l">Paste CSV</label>
+<textarea id="csv-in" spellcheck="false"></textarea>
+<div class="row"><label>…or open a file <input type="file" id="csv-file" accept=".csv,.tsv,.txt,.json,text/csv,application/json"></label><button id="csv-sample" class="sec">Example</button><button id="csv-swap" class="sec">Use output as input</button></div>
+<div id="csv-msg" class="msg" hidden></div>
+<ul id="csv-warn" class="warn" hidden></ul>
+<label for="csv-out">Output</label>
+<textarea id="csv-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="csv-copy" class="sec">Copy output</button><button id="csv-dl" class="sec">Download</button></div>

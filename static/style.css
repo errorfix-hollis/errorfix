@@ -67,3 +67,5 @@ tr.dskip td{background:var(--code);color:var(--mut);text-align:center;font-famil
 table.http td{vertical-align:top;font-size:14.5px}table.http td:first-child{width:4em}.ns{font-size:12px;font-weight:600;background:var(--code);border:1px solid var(--bd);border-radius:4px;padding:0 5px;color:var(--mut)}
 .tool table.hash th{width:16%}.tool table.hash td.cp{width:70px}.tool table.hash code{word-break:break-all}.tool table.hash button{font-size:13px;padding:2px 8px}tr.hit td,tr.hit th{background:var(--okbg)}
 pre.wsvis{white-space:pre;tab-size:4;max-height:420px;overflow:auto}.wst{color:var(--mut)}.wss,.wse{color:var(--mut)}.tw{background:var(--badbg);color:var(--acc)}.wsx{background:var(--acc);color:#fff;border-radius:3px;font-size:11px;padding:0 2px;margin:0 1px}
+.gigrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:4px 12px}.tool .gigrid label{display:flex;gap:6px;align-items:center;margin:0;color:var(--fg);font-size:15px}
+tr.ign th,tr.ign td{background:var(--badbg)}tr.trk th,tr.trk td{background:var(--okbg)}

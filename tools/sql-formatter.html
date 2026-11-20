@@ -1,0 +1,12 @@
+<label for="sql-in">Paste SQL</label>
+<textarea id="sql-in" spellcheck="false" placeholder="select id, name from users where active = 1 order by name"></textarea>
+<div class="row">
+<button id="sql-fmt">Format</button><button id="sql-min" class="sec">Minify</button>
+<label>Keywords <select id="sql-case" class="inline"><option value="upper">UPPERCASE</option><option value="lower">lowercase</option><option value="preserve">Keep as typed</option></select></label>
+<label>Indent <select id="sql-indent" class="inline"><option value="2">2 spaces</option><option value="4">4 spaces</option><option value="tab">Tab</option></select></label>
+<button id="sql-sample" class="sec">Example</button><button id="sql-clear" class="sec">Clear</button>
+</div>
+<div id="sql-msg" class="msg" hidden></div>
+<label for="sql-out">Output</label>
+<textarea id="sql-out" spellcheck="false" readonly></textarea>
+<div class="row"><button id="sql-copy" class="sec">Copy output</button></div>
