@@ -1,7 +1,7 @@
 # Content ideas backlog (update after each batch)
 Docker "Bind for 0.0.0.0 failed" (covered by docker-port-is-already-allocated; skip)
 MySQL 1045 using password: NO
-Web: 401 vs 403 explainer; 499 client closed request
+Web: 401 vs 403 explainer
 New (batch 16): pandas "KeyError" on column; Docker "failed to register layer"
 New (batch 17): k8s "did not find expected key"
 New (batch 18): Go "fatal error: concurrent map read and map write" (covered on concurrent-map-writes page, maybe alias); TS2307 vs TS2792
@@ -15,5 +15,6 @@ New (batch 26, left): TS2739 "missing the following properties" (alias of TS2741
 Left from batch 27: Java "Scanner nextLine skipped after nextInt"
 Left from batch 28: Rust E0596 "cannot borrow as mutable, as it is not declared as mutable" (check overlap with rust-cannot-borrow-as-mutable)
 Left from batch 29: apt "EXPKEYSIG"; Go "cannot use nil as type"; JS "structuredClone is not defined" (NXDOMAIN covered by web-err-name-not-resolved)
-New (batch 30): pandas "FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries"; npm "Missing script: dev"/"build" alias; TS2571 "Object is of type 'unknown'"; Go "no new variables on left side of :="; Python "AttributeError: 'Series' object has no attribute 'iteritems'"; Spring "Parameter 0 of constructor required a bean" alias; git "CONFLICT (modify/delete)"; Rust E0283 "type annotations needed: cannot satisfy"; ssh "Bad configuration option"
-New (batch 31): Python "TypeError: object of type 'int' has no len()"; MySQL "ERROR 1049 Unknown database"; git "fatal: You are not currently on a branch"; Docker "Error response from daemon: No such container"; Linux "mount: wrong fs type, bad option, bad superblock"; JS "Cannot set properties of undefined"; Java "error: unreachable statement" / "missing return statement"; npm "ERR! code ENOENT spawn"
+New (batch 30): pandas "FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries"; npm "Missing script: dev"/"build" alias; TS2571 "Object is of type 'unknown'"; Python "AttributeError: 'Series' object has no attribute 'iteritems'"; Spring "Parameter 0 of constructor required a bean" alias; Rust E0283 "type annotations needed: cannot satisfy"
+Left from batch 31: Java "error: unreachable statement" (mentioned on missing-return page)
+New (batch 32): sklearn "Found input variables with inconsistent numbers of samples"; k8s "error: unable to upgrade connection: container not found"; Docker "OCI runtime exec failed"; Spring "Request method 'POST' not supported" (405); git "fatal: refusing to merge... (shallow) / unshallow"; Python "ValueError: Input contains NaN"; nginx "upstream timed out (110: Connection timed out)"; Node "spawn EINVAL" on Windows .cmd; Linux "mount.nfs: access denied by server"; MySQL "ERROR 1290 --secure-file-priv"
