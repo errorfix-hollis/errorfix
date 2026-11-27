@@ -30,7 +30,7 @@ For scripts and CI pipelines, this is the standard command — it installs if mi
 helm upgrade --install myrelease ./chart -n myns --create-namespace -f values.yaml
 ```
 
-Add `--atomic` (renamed `--rollback-on-failure` in Helm 4) so a failed install/upgrade is rolled back automatically instead of leaving a failed release behind, and `--wait` to wait for resources to become ready.
+Add `--atomic` so a failed install/upgrade is rolled back automatically instead of leaving a failed release behind, and `--wait` to wait for resources to become ready.
 
 ## Fix 2: uninstall the old release and install again
 
